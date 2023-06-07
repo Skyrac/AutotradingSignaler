@@ -1,15 +1,17 @@
 ﻿namespace AutotradingSignaler.Core.Web;
-using Nethereum.Web3;
-using Nethereum.Contracts;
-using Nethereum.Hex.HexTypes;
-using Nethereum.RPC.Eth.DTOs;
+
+using _1InchApi;
+using AutotradingSignaler.Contracts.Data;
 using AutotradingSignaler.Contracts.Web3;
+using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
+using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
 
 public class Web3Service
 {
     private readonly ILogger<Web3Service> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IServiceScopeFactory _scopeFactory;
     public static readonly Dictionary<int, BlockchainDto> Chains = new Dictionary<int, BlockchainDto>()
         {
                     {
@@ -49,10 +51,11 @@ public class Web3Service
         };
 
     private readonly Dictionary<int, Web3> _web3 = new Dictionary<int, Web3>();
-    public Web3Service(ILogger<Web3Service> logger, IConfiguration configuration)
+    public Web3Service(ILogger<Web3Service> logger, IConfiguration configuration, IServiceScopeFactory scopeFactory)
     {
         _logger = logger;
         _configuration = configuration;
+        _scopeFactory = scopeFactory;
         var address = configuration["OracleWallet"];
         var privateKey = configuration["OraclePrivateKey"];
         foreach (var blockchain in Chains.Values)
@@ -60,6 +63,33 @@ public class Web3Service
             var account = new Account(privateKey);
             _web3.Add(blockchain.ChainId, new Web3(account, url: blockchain.RpcUrl));
         }
+        var _ = SyncTokenlists();
+    }
+
+    private async Task SyncTokenlists()
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var _unitOfWork = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+        var existingTokens = _unitOfWork.Tokens.GetAll();
+        var newTokens = new List<Token>();
+        foreach (var chainId in Chains.Keys)
+        {
+            var tokens = await OneInchApiWrapper.GetTokens((Chain)chainId);
+            if (tokens != null && tokens.Any())
+            {
+                newTokens.AddRange(tokens.Where(t => !existingTokens.Any(e => e.ChainId == chainId && e.Address == t.address))
+                                    .Select(t => new Token
+                                    {
+                                        ChainId = chainId,
+                                        Address = t.address,
+                                        Decimals = t.decimals,
+                                        Symbol = t.symbol,
+                                        Name = t.name,
+                                    }));
+            }
+        }
+        _unitOfWork.Tokens.Add(false, newTokens.ToArray());
+        _unitOfWork.Commit();
     }
 
     public Web3 GetWeb3InstanceOf(int chainId)
@@ -76,5 +106,4 @@ public class Web3Service
     {
         return Chains[56];
     }
-
 }
