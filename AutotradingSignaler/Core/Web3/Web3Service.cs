@@ -2,6 +2,7 @@
 
 using _1InchApi;
 using AutotradingSignaler.Contracts.Data;
+using AutotradingSignaler.Contracts.Dtos;
 using AutotradingSignaler.Contracts.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using Nethereum.Web3;
@@ -25,8 +26,8 @@ public class Web3Service
                     Explorer = "https://etherscan.io/",
                     NativeCurrency = new BlockchainCurrency
                     {
-                        Name = "Binance Coin",
-                        Symbol = "BNB",
+                        Name = "Ethereum",
+                        Symbol = "ETH",
                         Decimals = 18
                     }
                 }
@@ -108,6 +109,6 @@ public class Web3Service
 
     public BlockchainDto GetBlockchainInfoOf(int chainId)
     {
-        return Chains[56];
+        return Chains[chainId];
     }
 }

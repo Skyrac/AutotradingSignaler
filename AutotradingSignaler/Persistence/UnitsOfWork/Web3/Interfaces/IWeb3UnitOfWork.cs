@@ -6,4 +6,5 @@ namespace AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 public interface IWeb3UnitOfWork : IUnitOfWork
 {
     ITokenRepository Tokens { get; }
+    IWatchlistRepository Watchlist { get; }
 }

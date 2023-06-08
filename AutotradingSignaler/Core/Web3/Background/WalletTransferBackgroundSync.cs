@@ -1,11 +1,13 @@
 ﻿using AutotradingSignaler.Contracts.Data;
 using AutotradingSignaler.Contracts.Web3.Events;
+using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using Nethereum.Contracts;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.RPC.Reactive.Eth.Subscriptions;
 using Nethereum.Util;
+using NetTopologySuite.Operation.Valid;
 using System.Collections.Concurrent;
 using System.Numerics;
 
@@ -17,7 +19,7 @@ namespace AutotradingSignaler.Core.Web.Background
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly Web3Service _web3Service;
         private readonly ConcurrentQueue<UnprocessesSwapEvent> _unprocessedSwapEvents = new ConcurrentQueue<UnprocessesSwapEvent>();
-        private readonly List<string> _watchlist = new List<string>();
+        private readonly List<Watchlist> _watchlist = new List<Watchlist>();
 
         private record UnprocessesSwapEvent(int chainId, FilterLog log);
 
@@ -130,7 +132,16 @@ namespace AutotradingSignaler.Core.Web.Background
                     if (counter > 100)
                     {
                         counter = 0;
-                        //TODO: Get all current watched addresses
+                        using (var scope = _scopeFactory.CreateScope())
+                        {
+                            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+                            var watchlist = repository.Watchlist.GetAll().ToList();
+                            if (watchlist.Any())
+                            {
+                                _watchlist.Clear();
+                                _watchlist.AddRange(watchlist);
+                            }
+                        }
                     }
 
                 }
