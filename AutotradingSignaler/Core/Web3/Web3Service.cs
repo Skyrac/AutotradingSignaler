@@ -88,7 +88,11 @@ public class Web3Service
                                     }));
             }
         }
-        _unitOfWork.Tokens.Add(false, newTokens.ToArray());
+        foreach (var token in newTokens)
+        {
+            _unitOfWork.Tokens.Add(token);
+
+        }
         _unitOfWork.Commit();
     }
 
