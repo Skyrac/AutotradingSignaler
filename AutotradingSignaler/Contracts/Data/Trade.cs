@@ -12,5 +12,6 @@ public class Trade : BaseEntity
     public decimal TokenOutAmount { get; set; }
     public string TxHash { get; set; }
     public int ChainId { get; set; }
+    public bool IsBuy { get; set; }
     public double Profit { get; set; }
 }
