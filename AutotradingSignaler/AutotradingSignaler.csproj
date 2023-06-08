@@ -31,7 +31,6 @@
 
   <ItemGroup>
     <Folder Include="Core\Exceptions\" />
-    <Folder Include="Core\Handlers\Commands\" />
   </ItemGroup>
 
   <ItemGroup>

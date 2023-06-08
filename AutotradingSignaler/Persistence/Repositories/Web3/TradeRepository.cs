@@ -4,9 +4,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AutotradingSignaler.Persistence.Repositories.Web3;
 
-public class TokenRepository : Repository<Token>, ITokenRepository
+public class TradeRepository : Repository<Trade>, ITradeRepository
 {
-    public TokenRepository(DbContext context) : base(context)
+    public TradeRepository(DbContext context) : base(context)
     {
     }
 }

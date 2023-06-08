@@ -1,6 +1,9 @@
 ﻿using AutotradingSignaler.Contracts.Data;
 using AutotradingSignaler.Contracts.Web3.Events;
+using AutotradingSignaler.Core.Handlers.Commands.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
+using MediatR;
+using Microsoft.OpenApi.Writers;
 using Nethereum.Contracts;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
@@ -63,69 +66,11 @@ namespace AutotradingSignaler.Core.Web.Background
                         var to = receipt.To;
                         EventLog<TransferEventDTO> fromLog = null;  //Log of Token that was sent into swap
                         EventLog<TransferEventDTO> toLog = null;    //Log of Token that was received from swap
-                        var events = receipt.DecodeAllEvents<TransferEventDTO>();
-                        foreach (var log in events)
-                        {
-                            if (log.Event != null)
-                            {
-                                _logger.LogInformation($"{log.Log.Address} sent from {log.Event.From} to {log.Event.To}");
-                                if (log.Event.From.Equals(from, StringComparison.OrdinalIgnoreCase)) //Sent Tokens
-                                {
-                                    fromLog = log;
-                                    _logger.LogInformation($"Identified token transfer event from sender into contract");
-                                }
-                                else if (fromLog == null && log.Event.From.Equals(to, StringComparison.OrdinalIgnoreCase)) //Sent BNB if no Token <> Token Trade
-                                {
-                                    fromLog = log;
-                                    _logger.LogInformation($"Identified BNB token transfer event from sender into contract");
-
-                                }
-                                else if (log.Event.To.Equals(from, StringComparison.OrdinalIgnoreCase)) //Received Tokens
-                                {
-                                    toLog = log;
-                                    _logger.LogInformation($"Identified token transfer event from contract to sender");
-                                }
-                                else if (toLog == null && log.Event.To.Equals(to, StringComparison.OrdinalIgnoreCase)) //Receive BNB if no Token <> Token Trade
-                                {
-                                    toLog = log;
-                                    _logger.LogInformation($"Identified BNB token transfer event from contract to sender");
-                                }
-                                else if (to.Equals(log.Event.From, StringComparison.OrdinalIgnoreCase) || from.Equals(log.Event.To, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    _logger.LogInformation($"Strange things did happen here");
-
-                                }
-                            }
-                        }
+                        RetrieveTradeInformation(receipt, from, to, ref fromLog, ref toLog);
 
                         if (fromLog != null && toLog != null)
                         {
-                            var tokenInserted = fromLog!.Log.Address;
-                            var tokenReceived = toLog!.Log.Address;
-                            //1 try to get token data from db
-                            //2 if not found get it from blockchain
-                            var tokenIn = await GetTokenDataFromDatabase(tokenInserted, unprocessedEvent.chainId);
-                            if (tokenIn == null)
-                            {
-                                tokenIn = GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
-                            }
-                            var tokenOut = await GetTokenDataFromDatabase(tokenReceived, unprocessedEvent.chainId);
-                            if (tokenOut == null)
-                            {
-                                tokenOut = GetTokenData(tokenReceived, unprocessedEvent.chainId, cancellationToken);
-                            }
-                            var newEntry = new Trade
-                            {
-                                Trader = from,
-                                Plattform = to,
-                                TokenIn = tokenIn.Address,
-                                TokenOut = tokenOut.Address,
-                                TokenInAmount = UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
-                                TokenOutAmount = UnitConversion.Convert.FromWei(toLog.Event.Value, tokenOut.Decimals),
-                                ChainId = unprocessedEvent.chainId,
-                                TxHash = receipt.TransactionHash
-                            };
-                            _logger.LogInformation($"New trade entry on chain {newEntry.ChainId} for tx {newEntry.TxHash}");
+                            await ProcessTradeInformation(unprocessedEvent, receipt, from, to, fromLog, toLog, cancellationToken);
                         }
                         Thread.Sleep(500);
                     }
@@ -155,6 +100,64 @@ namespace AutotradingSignaler.Core.Web.Background
                 counter++;
             }
         }
+
+        private void RetrieveTradeInformation(TransactionReceipt receipt, string from, string to, ref EventLog<TransferEventDTO> fromLog, ref EventLog<TransferEventDTO> toLog)
+        {
+            var events = receipt.DecodeAllEvents<TransferEventDTO>();
+            foreach (var log in events)
+            {
+                if (log.Event != null)
+                {
+                    _logger.LogInformation($"{log.Log.Address} sent from {log.Event.From} to {log.Event.To}");
+                    if (log.Event.From.Equals(from, StringComparison.OrdinalIgnoreCase)) //Sent Tokens
+                    {
+                        fromLog = log;
+                        _logger.LogInformation($"Identified token transfer event from sender into contract");
+                    }
+                    else if (fromLog == null && log.Event.From.Equals(to, StringComparison.OrdinalIgnoreCase)) //Sent BNB if no Token <> Token Trade
+                    {
+                        fromLog = log;
+                        _logger.LogInformation($"Identified BNB token transfer event from sender into contract");
+
+                    }
+                    else if (log.Event.To.Equals(from, StringComparison.OrdinalIgnoreCase)) //Received Tokens
+                    {
+                        toLog = log;
+                        _logger.LogInformation($"Identified token transfer event from contract to sender");
+                    }
+                    else if (toLog == null && log.Event.To.Equals(to, StringComparison.OrdinalIgnoreCase)) //Receive BNB if no Token <> Token Trade
+                    {
+                        toLog = log;
+                        _logger.LogInformation($"Identified BNB token transfer event from contract to sender");
+                    }
+                }
+            }
+        }
+
+        private async Task ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, CancellationToken cancellationToken)
+        {
+            var tokenInserted = fromLog!.Log.Address;
+            var tokenReceived = toLog!.Log.Address;
+            var tokenIn = await GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
+            var tokenOut = await GetTokenData(tokenReceived, unprocessedEvent.chainId, cancellationToken);
+            var newEntry = new Trade
+            {
+                Trader = from,
+                Plattform = to,
+                TokenIn = tokenIn.Address,
+                TokenOut = tokenOut.Address,
+                TokenInAmount = UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
+                TokenOutAmount = UnitConversion.Convert.FromWei(toLog.Event.Value, tokenOut.Decimals),
+                ChainId = unprocessedEvent.chainId,
+                TxHash = receipt.TransactionHash
+            };
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+            repository.Trades.Add(newEntry);
+            repository.Commit();
+            _logger.LogInformation($"New trade entry on chain {newEntry.ChainId} for tx {newEntry.TxHash}");
+        }
+
         //BNB Trade: https://bscscan.com/tx/0x596b80b249a296040d4b48e03ee0cd7396840ca6b45e56ccbccf273b645f41d1#eventlog
         //Other token trade: https://bscscan.com/tx/0x958aae7d28396ce850e12ece6ca5cc8ac882350002344b083e374052e6508c2f#eventlog
 
@@ -163,25 +166,15 @@ namespace AutotradingSignaler.Core.Web.Background
             return null;
         }
 
-        private Token GetTokenData(string address, int chainId, CancellationToken cancellationToken)
+        private async Task<Token> GetTokenData(string address, int chainId, CancellationToken cancellationToken)
         {
-            var web3 = _web3Service.GetWeb3InstanceOf(chainId);
-            var tasks = new List<Task>();
-            var decimals = web3.Eth.ERC20.GetContractService(address).DecimalsQueryAsync();
-            tasks.Add(decimals);
-            var name = web3.Eth.ERC20.GetContractService(address).NameQueryAsync();
-            tasks.Add(name);
-            var symbol = web3.Eth.ERC20.GetContractService(address).SymbolQueryAsync();
-            tasks.Add(symbol);
-            Task.WaitAll(tasks.ToArray(), cancellationToken);
-            return new Token
+            using var scope = _scopeFactory.CreateScope();
+            var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+            return await mediator.Send(new AddTokenCommand
             {
                 Address = address,
                 ChainId = chainId,
-                Name = name.Result,
-                Symbol = symbol.Result,
-                Decimals = decimals.Result,
-            };
+            });
         }
 
 
@@ -216,10 +209,10 @@ namespace AutotradingSignaler.Core.Web.Background
                 try
                 {
                     // decode the log into a typed event log
-                    //if (!_watchlist.Any(w => w.Equals(log.Address, StringComparison.OrdinalIgnoreCase)))
-                    //{
-                    //    return;
-                    //}
+                    if (!_watchlist.Any(w => w.Address.Equals(log.Address, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return;
+                    }
                     _unprocessedSwapEvents.Enqueue(new UnprocessesSwapEvent(chainId, log));
                     var decoded = Event<SwapEventV2>.DecodeEvent(log);
                     if (decoded != null)
