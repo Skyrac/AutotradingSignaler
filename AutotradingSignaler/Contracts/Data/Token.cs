@@ -1,5 +1,4 @@
 ﻿using Microsoft.EntityFrameworkCore;
-using System.ComponentModel.DataAnnotations.Schema;
 
 namespace AutotradingSignaler.Contracts.Data;
 
@@ -17,4 +16,5 @@ public class Token : BaseEntity
     public string Symbol { get; set; }
     public int Decimals { get; set; }
     public int ChainId { get; set; }
+    public string? LogoURI { get; set; }
 }

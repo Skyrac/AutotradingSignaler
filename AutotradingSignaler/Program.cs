@@ -12,6 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 var keyVaultEndpoint = new Uri(builder.Configuration["AzureKeyVaultEndpoint"]!);
 builder.Configuration.AddAzureKeyVault(keyVaultEndpoint, new DefaultAzureCredential());
 // Add services to the container.
+builder.Services.AddCors();
 
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
@@ -36,8 +37,15 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
-}
 
+}
+app.UseCors(builder =>
+{
+    if (app.Environment.IsDevelopment())
+    {
+        builder.AllowAnyHeader().AllowAnyOrigin().AllowAnyMethod();
+    }
+});
 app.UseHttpsRedirection();
 
 app.UseAuthorization();

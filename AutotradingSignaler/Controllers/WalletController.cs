@@ -6,7 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace AutotradingSignaler.Controllers;
 
 [ApiController]
-[Route("wallet")]
+[Route("v1/wallets")]
 public class WalletController : ControllerBase
 {
     private readonly IMediator _mediator;

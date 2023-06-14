@@ -19,12 +19,13 @@ public class TokenController : ControllerBase
         _logger = logger;
     }
 
-    [HttpPost("{address}/add")]
-    public async Task<ActionResult<TokenDto>> AddToken(string address)
+    [HttpPost("{chainId}/{address}/add")]
+    public async Task<ActionResult<TokenDto>> AddToken(int chainId, string address)
     {
         var query = new AddTokenCommand
         {
-            Address = address
+            Address = address,
+            ChainId = chainId
         };
         var response = await _mediator.Send(query);
         return Ok(response?.Adapt<TokenDto>());

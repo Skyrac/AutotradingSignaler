@@ -15,23 +15,23 @@ public class Web3Service
     private readonly IServiceScopeFactory _scopeFactory;
     public static readonly Dictionary<int, BlockchainDto> Chains = new Dictionary<int, BlockchainDto>()
         {
-                    {
-                1, new BlockchainDto()
-                {
-                    ChainName = "Ethereum",
-                    Coin = "ETH",
-                    ChainId = 1,
-                    RpcUrl = "https://eth.llamarpc.com",
-                    WssUrl = "wss://main-light.eth.linkpool.io/ws",
-                    Explorer = "https://etherscan.io/",
-                    NativeCurrency = new BlockchainCurrency
-                    {
-                        Name = "Ethereum",
-                        Symbol = "ETH",
-                        Decimals = 18
-                    }
-                }
-            },
+            //        {
+            //    1, new BlockchainDto()
+            //    {
+            //        ChainName = "Ethereum",
+            //        Coin = "ETH",
+            //        ChainId = 1,
+            //        RpcUrl = "https://eth.llamarpc.com",
+            //        WssUrl = "wss://main-light.eth.linkpool.io/ws",
+            //        Explorer = "https://etherscan.io/",
+            //        NativeCurrency = new BlockchainCurrency
+            //        {
+            //            Name = "Ethereum",
+            //            Symbol = "ETH",
+            //            Decimals = 18
+            //        }
+            //    }
+            //},
             {
                 56, new BlockchainDto()
                 {
@@ -86,6 +86,7 @@ public class Web3Service
                                         Decimals = t.decimals,
                                         Symbol = t.symbol,
                                         Name = t.name,
+                                        LogoURI = t.logoURI,
                                     }));
             }
         }

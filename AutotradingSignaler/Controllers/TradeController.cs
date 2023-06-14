@@ -2,6 +2,7 @@
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
 using AutotradingSignaler.Core.Handlers.Queries.Web3;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AutotradingSignaler.Controllers;
@@ -20,7 +21,7 @@ public class TradeController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<ActionResult<WalletDto>> GetTradeHistory([FromQuery] GetTradeHistoryQuery query)
+    public async Task<ActionResult<TradeHistoryDto>> GetTradeHistory([FromQuery] GetTradeHistoryQuery query)
     {
         var response = await _mediator.Send(query);
         return Ok(response);
@@ -37,6 +38,7 @@ public class TradeController : ControllerBase
         return Ok();
     }
 
+    [Authorize]
     [HttpPost("watchlist/{address}/remove")]
     public async Task<ActionResult<WalletDto>> RemoveFromWatchlist(string address)
     {

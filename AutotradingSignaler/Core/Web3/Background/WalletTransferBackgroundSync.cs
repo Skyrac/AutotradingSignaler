@@ -3,7 +3,6 @@ using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using MediatR;
-using Microsoft.OpenApi.Writers;
 using Nethereum.Contracts;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
@@ -12,7 +11,7 @@ using Nethereum.RPC.Reactive.Eth.Subscriptions;
 using Nethereum.Util;
 using NetTopologySuite.Operation.Valid;
 using System.Collections.Concurrent;
-using System.Numerics;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace AutotradingSignaler.Core.Web.Background
 {
@@ -38,7 +37,7 @@ namespace AutotradingSignaler.Core.Web.Background
 
             var subs = new List<EthLogsObservableSubscription>();
             var counter = 0;
-
+            var testCount = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
 
@@ -71,8 +70,18 @@ namespace AutotradingSignaler.Core.Web.Background
                         if (fromLog != null && toLog != null)
                         {
                             await ProcessTradeInformation(unprocessedEvent, receipt, from, to, fromLog, toLog, cancellationToken);
+                            testCount++;
+
+                            if (testCount > 20)
+                            {
+
+                                subs.ForEach(async sub => await sub.UnsubscribeAsync());
+                                Thread.Sleep(5000);
+                                _unprocessedSwapEvents.Clear();
+                            }
                         }
                         Thread.Sleep(500);
+
                     }
                     if (counter > 100)
                     {
@@ -93,9 +102,12 @@ namespace AutotradingSignaler.Core.Web.Background
                 catch (Exception ex)
                 {
                     _logger.LogError($"Exception in BackgroundService: {nameof(WalletTransferBackgroundSync)} - {ex?.InnerException?.Message ?? ex?.Message}");
-                    subs.ForEach(async sub => await sub.UnsubscribeAsync());
-                    await Task.Delay(TimeSpan.FromSeconds(20));
-                    subs.Clear();
+                    if (testCount <= 0)
+                    {
+                        subs.ForEach(async sub => await sub.UnsubscribeAsync());
+                        await Task.Delay(TimeSpan.FromSeconds(20));
+                        subs.Clear();
+                    }
                 }
                 counter++;
             }
@@ -136,6 +148,12 @@ namespace AutotradingSignaler.Core.Web.Background
 
         private async Task ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, CancellationToken cancellationToken)
         {
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+            if (repository.Trades.Any(t => t.TxHash == receipt.TransactionHash && t.ChainId == unprocessedEvent.chainId))
+            {
+                return;
+            }
             var tokenInserted = fromLog!.Log.Address;
             var tokenReceived = toLog!.Log.Address;
             var tokenIn = await GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
@@ -151,8 +169,8 @@ namespace AutotradingSignaler.Core.Web.Background
                 ChainId = unprocessedEvent.chainId,
                 TxHash = receipt.TransactionHash
             };
-            using var scope = _scopeFactory.CreateScope();
-            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+
+
             repository.Trades.Add(newEntry);
             repository.Commit();
             _logger.LogInformation($"New trade entry on chain {newEntry.ChainId} for tx {newEntry.TxHash}");
@@ -208,11 +226,11 @@ namespace AutotradingSignaler.Core.Web.Background
             {
                 try
                 {
-                    // decode the log into a typed event log
-                    if (!_watchlist.Any(w => w.Address.Equals(log.Address, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        return;
-                    }
+                    //decode the log into a typed event log
+                    //if (!_watchlist.Any(w => w.Address.Equals(log.Address, StringComparison.OrdinalIgnoreCase)))
+                    //{
+                    //    return;
+                    //}
                     _unprocessedSwapEvents.Enqueue(new UnprocessesSwapEvent(chainId, log));
                     var decoded = Event<SwapEventV2>.DecodeEvent(log);
                     if (decoded != null)
@@ -234,11 +252,11 @@ namespace AutotradingSignaler.Core.Web.Background
             });
 
             // open the web socket connection
-            // await client.StartAsync();
+            await client.StartAsync();
 
             // begin receiving subscription data
             // data will be received on a background thread
-            // await subscription.SubscribeAsync(filterTransfers);
+            await subscription.SubscribeAsync(filterTransfers);
 
             //// run for a while
             //await Task.Delay(TimeSpan.FromMinutes(60));
