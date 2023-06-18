@@ -44,7 +44,7 @@ namespace AutotradingSignaler.Core.Handlers.Queries.Web3
         private async Task ProcessWeb3Instance(string address, KeyValuePair<int, Nethereum.Web3.Web3> web3Instance, IEnumerable<Token> tokens, IList<TokenDto> tokenBalances)
         {
             var tokensOfChain = tokens.Where(t => t.ChainId == web3Instance.Key);
-            var callist = new List<MulticallInputOutput<BalanceOfFunction, BalanceOfOutputDTO>>();
+            var callist = new List<IMulticallInputOutput>();
             foreach (var token in tokensOfChain)
             {
                 var balanceOfMessage = new BalanceOfFunction() { Owner = address };
@@ -55,14 +55,18 @@ namespace AutotradingSignaler.Core.Handlers.Queries.Web3
 
             for (var i = 0; i < tokensOfChain.Count(); i++)
             {
-                var balance = callist[i].Output.Balance;
-                if (balance <= 0)
+                if (callist[i] is MulticallInputOutput<BalanceOfFunction, BalanceOfOutputDTO> result)
                 {
-                    continue;
+                    var balance = result.Output.Balance;
+                    if (balance <= 0)
+                    {
+                        continue;
+                    }
+                    var token = tokensOfChain.ElementAt(i).Adapt<TokenDto>();
+                    token.Balance = UnitConversion.Convert.FromWei(balance, token.Decimals);
+                    tokenBalances.Add(token);
                 }
-                var token = tokensOfChain.ElementAt(i).Adapt<TokenDto>();
-                token.Balance = UnitConversion.Convert.FromWei(balance, token.Decimals);
-                tokenBalances.Add(token);
+
             }
             var balanceOfChainToken = await web3Instance.Value.Eth.GetBalance.SendRequestAsync(address);
             var chainInfo = _web3Service.GetBlockchainInfoOf(web3Instance.Key);

@@ -4,6 +4,9 @@ using AutotradingSignaler.Core.Web;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using Mapster;
 using MediatR;
+using Nethereum.Contracts.QueryHandlers.MultiCall;
+using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
+using static Azure.Core.HttpHeader;
 
 namespace AutotradingSignaler.Core.Handlers.Commands.Web3
 {
@@ -55,14 +58,26 @@ namespace AutotradingSignaler.Core.Handlers.Commands.Web3
                 return null;
             }
             var tasks = new List<Task>();
-            var decimals = web3.Eth.ERC20.GetContractService(address).DecimalsQueryAsync();
-            tasks.Add(decimals);
-            var name = web3.Eth.ERC20.GetContractService(address).NameQueryAsync();
-            tasks.Add(name);
-            var symbol = web3.Eth.ERC20.GetContractService(address).SymbolQueryAsync();
-            tasks.Add(symbol);
-            await Task.WhenAll(tasks);
-            if (string.IsNullOrEmpty(name.Result) || string.IsNullOrEmpty(symbol.Result))
+            var callist = new List<IMulticallInputOutput>();
+            var decimalMessage = new DecimalsFunction();
+            var decimalsResult = new MulticallInputOutput<DecimalsFunction, DecimalsOutputDTO>(decimalMessage, address);
+            callist.Add(decimalsResult);
+            var nameMessage = new NameFunction();
+            var nameResult = new MulticallInputOutput<NameFunction, NameOutputDTO>(nameMessage, address);
+            callist.Add(nameResult);
+            var symbolMessage = new SymbolFunction();
+            var symbolResult = new MulticallInputOutput<SymbolFunction, SymbolOutputDTO>(symbolMessage, address);
+            callist.Add(symbolResult);
+            //var decimals = web3.Eth.ERC20.GetContractService(address).DecimalsQueryAsync();
+            //tasks.Add(decimals);
+            //var name = web3.Eth.ERC20.GetContractService(address).NameQueryAsync();
+            //tasks.Add(name);
+            //var symbol = web3.Eth.ERC20.GetContractService(address).SymbolQueryAsync();
+            //tasks.Add(symbol);
+            //await Task.WhenAll(tasks);
+            await web3.Eth.GetMultiQueryHandler().MultiCallAsync(callist.ToArray()).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(nameResult.Output.Name) || string.IsNullOrEmpty(symbolResult.Output.Symbol))
             {
                 return null;
             }
@@ -70,9 +85,9 @@ namespace AutotradingSignaler.Core.Handlers.Commands.Web3
             {
                 Address = address,
                 ChainId = chainId,
-                Name = name.Result,
-                Symbol = symbol.Result,
-                Decimals = decimals.Result,
+                Name = nameResult.Output.Name,
+                Symbol = symbolResult.Output.Symbol,
+                Decimals = decimalsResult.Output.Decimals,
             };
 
         }

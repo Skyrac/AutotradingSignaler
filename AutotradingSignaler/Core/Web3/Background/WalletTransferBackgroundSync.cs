@@ -2,13 +2,20 @@
 using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
+using Mapster;
 using MediatR;
+using Nethereum.BlockchainProcessing.Services;
 using Nethereum.Contracts;
+using Nethereum.Contracts.QueryHandlers.MultiCall;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
+using Nethereum.JsonRpc.Client;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
 using Nethereum.RPC.Eth.DTOs;
+using Nethereum.RPC.Eth.Transactions;
 using Nethereum.RPC.Reactive.Eth.Subscriptions;
+using Nethereum.RPC.Reactive.Polling;
 using Nethereum.Util;
+using Nethereum.Web3;
 using NetTopologySuite.Operation.Valid;
 using System.Collections.Concurrent;
 using static System.Net.Mime.MediaTypeNames;
@@ -36,12 +43,11 @@ namespace AutotradingSignaler.Core.Web.Background
         {
 
             var subs = new List<EthLogsObservableSubscription>();
+            var unprocessed = new List<UnprocessesSwapEvent>();
+            var unsuccessfull = new List<UnprocessesSwapEvent>();
             var counter = 0;
-            var testCount = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
-
-                await Task.Delay(5000);
                 try
                 {
                     if (!subs.Any())
@@ -55,62 +61,77 @@ namespace AutotradingSignaler.Core.Web.Background
 
                     while (_unprocessedSwapEvents.TryDequeue(out var unprocessedEvent))
                     {
-                        var receipt = await GetTransactionReceipt(unprocessedEvent);
-                        if (receipt == null)
+                        unprocessed.Add(unprocessedEvent);
+                        if (_unprocessedSwapEvents.Count <= 5 || unprocessed.Count >= 100)
                         {
-                            _logger.LogWarning($"{unprocessedEvent.chainId}: No receipt for {unprocessedEvent.log.TransactionHash}");
-                            continue;
+                            await ProcessSwapEvents(unprocessed, unsuccessfull, unprocessedEvent, cancellationToken);
                         }
-                        var from = receipt.From;
-                        var to = receipt.To;
-                        EventLog<TransferEventDTO> fromLog = null;  //Log of Token that was sent into swap
-                        EventLog<TransferEventDTO> toLog = null;    //Log of Token that was received from swap
-                        RetrieveTradeInformation(receipt, from, to, ref fromLog, ref toLog);
 
-                        if (fromLog != null && toLog != null)
-                        {
-                            await ProcessTradeInformation(unprocessedEvent, receipt, from, to, fromLog, toLog, cancellationToken);
-                            testCount++;
-
-                            if (testCount > 20)
-                            {
-
-                                subs.ForEach(async sub => await sub.UnsubscribeAsync());
-                                Thread.Sleep(5000);
-                                _unprocessedSwapEvents.Clear();
-                            }
-                        }
-                        Thread.Sleep(500);
-
-                    }
-                    if (counter > 100)
-                    {
-                        counter = 0;
-                        using (var scope = _scopeFactory.CreateScope())
-                        {
-                            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
-                            var watchlist = repository.Watchlist.GetAll().ToList();
-                            if (watchlist.Any())
-                            {
-                                _watchlist.Clear();
-                                _watchlist.AddRange(watchlist);
-                            }
-                        }
                     }
 
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError($"Exception in BackgroundService: {nameof(WalletTransferBackgroundSync)} - {ex?.InnerException?.Message ?? ex?.Message}");
-                    if (testCount <= 0)
+                    subs.ForEach(async sub => await sub.UnsubscribeAsync());
+                    await Task.Delay(TimeSpan.FromSeconds(20));
+                    subs.Clear();
+                }
+
+                counter = CheckAndUpdateWatchlist(counter);
+            }
+        }
+
+        private int CheckAndUpdateWatchlist(int counter)
+        {
+            counter++;
+            if (counter > 100)
+            {
+                counter = 0;
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+                    var watchlist = repository.Watchlist.GetAll().ToList();
+                    if (watchlist.Any())
                     {
-                        subs.ForEach(async sub => await sub.UnsubscribeAsync());
-                        await Task.Delay(TimeSpan.FromSeconds(20));
-                        subs.Clear();
+                        _watchlist.Clear();
+                        _watchlist.AddRange(watchlist);
                     }
                 }
-                counter++;
             }
+            return counter;
+        }
+
+        private async Task ProcessSwapEvents(List<UnprocessesSwapEvent> unprocessed, List<UnprocessesSwapEvent> unsuccessfull, UnprocessesSwapEvent unprocessedEvent, CancellationToken cancellationToken)
+        {
+            unprocessed.AddRange(unsuccessfull);
+            await Task.Delay(500);
+            var receiptDict = await GetTransactionReceipts(unprocessed);
+            foreach (var result in receiptDict)
+            {
+                if (result.Value.HasError || result.Value.Response == null)
+                {
+                    unsuccessfull.Add(unprocessedEvent);
+                    _logger.LogWarning($"{unprocessedEvent.chainId}: No receipt for {unprocessedEvent.log.TransactionHash}");
+                    continue;
+                }
+                if (unsuccessfull.Contains(result.Key))
+                {
+                    unsuccessfull.Remove(result.Key);
+                }
+                var receipt = result.Value.Response;
+                var from = receipt.From;
+                var to = receipt.To;
+                EventLog<TransferEventDTO> fromLog = null;  //Log of Token that was sent into swap
+                EventLog<TransferEventDTO> toLog = null;    //Log of Token that was received from swap
+                RetrieveTradeInformation(receipt, from, to, ref fromLog, ref toLog);
+
+                if (fromLog != null && toLog != null)
+                {
+                    await ProcessTradeInformation(unprocessedEvent, receipt, from, to, fromLog, toLog, cancellationToken);
+                }
+            }
+            unprocessed.Clear();
         }
 
         private void RetrieveTradeInformation(TransactionReceipt receipt, string from, string to, ref EventLog<TransferEventDTO> fromLog, ref EventLog<TransferEventDTO> toLog)
@@ -211,6 +232,35 @@ namespace AutotradingSignaler.Core.Web.Background
                 _logger.LogError($"Error receiving transaction receipt for: {txHash}");
                 return null;
             }
+        }
+
+        private async Task<Dictionary<UnprocessesSwapEvent, RpcRequestResponseBatchItem<EthGetTransactionReceipt, TransactionReceipt>>> GetTransactionReceipts(List<UnprocessesSwapEvent> swapEvents)
+        {
+            var dict = new Dictionary<UnprocessesSwapEvent, RpcRequestResponseBatchItem<EthGetTransactionReceipt, TransactionReceipt>>();
+            var requests = new Dictionary<Web3, RpcRequestResponseBatch>();
+
+            foreach (var swapEvent in swapEvents)
+            {
+                var web3 = _web3Service.GetWeb3InstanceOf(swapEvent.chainId);
+                RpcRequestResponseBatch request;
+                if (!requests.ContainsKey(web3))
+                {
+                    requests.Add(web3, request = new RpcRequestResponseBatch());
+                }
+                else
+                {
+                    request = requests[web3];
+                }
+                var batchItem = new RpcRequestResponseBatchItem<EthGetTransactionReceipt, TransactionReceipt>((EthGetTransactionReceipt)web3.Eth.Transactions.GetTransactionReceipt, web3.Eth.Transactions.GetTransactionReceipt.BuildRequest(swapEvent.log.TransactionHash));
+                request.BatchItems.Add(batchItem);
+
+                dict.Add(swapEvent, batchItem);
+            }
+            foreach (var entry in requests)
+            {
+                await entry.Key.Client.SendBatchRequestAsync(entry.Value);
+            }
+            return dict;
         }
 
         private async Task<EthLogsObservableSubscription> GetLogsTokenTransfer_Observable_Subscription(int chainId)
