@@ -1,24 +1,18 @@
 ﻿using AutotradingSignaler.Contracts.Data;
+using AutotradingSignaler.Contracts.Web3.Contracts;
 using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
-using Mapster;
 using MediatR;
-using Nethereum.BlockchainProcessing.Services;
 using Nethereum.Contracts;
-using Nethereum.Contracts.QueryHandlers.MultiCall;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.Client;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.RPC.Eth.Transactions;
 using Nethereum.RPC.Reactive.Eth.Subscriptions;
-using Nethereum.RPC.Reactive.Polling;
 using Nethereum.Util;
-using Nethereum.Web3;
-using NetTopologySuite.Operation.Valid;
 using System.Collections.Concurrent;
-using static System.Net.Mime.MediaTypeNames;
 
 namespace AutotradingSignaler.Core.Web.Background
 {
@@ -44,7 +38,6 @@ namespace AutotradingSignaler.Core.Web.Background
 
             var subs = new List<EthLogsObservableSubscription>();
             var unprocessed = new List<UnprocessesSwapEvent>();
-            var unsuccessfull = new List<UnprocessesSwapEvent>();
             var counter = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -62,9 +55,9 @@ namespace AutotradingSignaler.Core.Web.Background
                     while (_unprocessedSwapEvents.TryDequeue(out var unprocessedEvent))
                     {
                         unprocessed.Add(unprocessedEvent);
-                        if (_unprocessedSwapEvents.Count <= 5 || unprocessed.Count >= 100)
+                        if (_unprocessedSwapEvents.Count <= 0 || unprocessed.Count >= 100)
                         {
-                            await ProcessSwapEvents(unprocessed, unsuccessfull, unprocessedEvent, cancellationToken);
+                            await ProcessSwapEvents(unprocessed, cancellationToken);
                         }
 
                     }
@@ -102,22 +95,21 @@ namespace AutotradingSignaler.Core.Web.Background
             return counter;
         }
 
-        private async Task ProcessSwapEvents(List<UnprocessesSwapEvent> unprocessed, List<UnprocessesSwapEvent> unsuccessfull, UnprocessesSwapEvent unprocessedEvent, CancellationToken cancellationToken)
+        private async Task ProcessSwapEvents(List<UnprocessesSwapEvent> unprocessed, CancellationToken cancellationToken)
         {
-            unprocessed.AddRange(unsuccessfull);
             await Task.Delay(500);
             var receiptDict = await GetTransactionReceipts(unprocessed);
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+
+            var allPlattforms = receiptDict.Values.Where(u => u.Response != null).Select(u => u.Response.To).Distinct().ToList();
+            var existingPlattforms = repository.TradingPlattforms.Where(t => allPlattforms.Contains(t.Router)).GetAll().ToList();
             foreach (var result in receiptDict)
             {
                 if (result.Value.HasError || result.Value.Response == null)
                 {
-                    unsuccessfull.Add(unprocessedEvent);
-                    _logger.LogWarning($"{unprocessedEvent.chainId}: No receipt for {unprocessedEvent.log.TransactionHash}");
+                    _logger.LogWarning($"{result.Key.chainId}: No receipt for {result.Key.log.TransactionHash}");
                     continue;
-                }
-                if (unsuccessfull.Contains(result.Key))
-                {
-                    unsuccessfull.Remove(result.Key);
                 }
                 var receipt = result.Value.Response;
                 var from = receipt.From;
@@ -128,9 +120,11 @@ namespace AutotradingSignaler.Core.Web.Background
 
                 if (fromLog != null && toLog != null)
                 {
-                    await ProcessTradeInformation(unprocessedEvent, receipt, from, to, fromLog, toLog, cancellationToken);
+                    await ProcessTradeInformation(result.Key, receipt, from, to, fromLog, toLog, repository, allPlattforms, existingPlattforms, cancellationToken);
                 }
             }
+
+            repository.Commit();
             unprocessed.Clear();
         }
 
@@ -167,10 +161,9 @@ namespace AutotradingSignaler.Core.Web.Background
             }
         }
 
-        private async Task ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, CancellationToken cancellationToken)
+        private async Task ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, IWeb3UnitOfWork repository, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+
             if (repository.Trades.Any(t => t.TxHash == receipt.TransactionHash && t.ChainId == unprocessedEvent.chainId))
             {
                 return;
@@ -179,10 +172,24 @@ namespace AutotradingSignaler.Core.Web.Background
             var tokenReceived = toLog!.Log.Address;
             var tokenIn = await GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
             var tokenOut = await GetTokenData(tokenReceived, unprocessedEvent.chainId, cancellationToken);
+            var plattform = existingPlattforms.FirstOrDefault(e => e.Router.Equals(to, StringComparison.OrdinalIgnoreCase))
+                ?? new TradingPlattform
+                {
+                    Router = to,
+                    Factory = await GetFactoryFromRouter(to, unprocessedEvent.chainId),
+                    ChainId = unprocessedEvent.chainId
+                };
+
+            if (string.IsNullOrEmpty(plattform.Factory))
+            {
+                plattform.IsValid = false;
+            }
+
             var newEntry = new Trade
             {
                 Trader = from,
-                Plattform = to,
+                Plattform = plattform,
+                PlattformId = plattform.Id,
                 TokenIn = tokenIn.Address,
                 TokenOut = tokenOut.Address,
                 TokenInAmount = UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
@@ -193,8 +200,14 @@ namespace AutotradingSignaler.Core.Web.Background
 
 
             repository.Trades.Add(newEntry);
-            repository.Commit();
             _logger.LogInformation($"New trade entry on chain {newEntry.ChainId} for tx {newEntry.TxHash}");
+        }
+
+        private async Task<string> GetFactoryFromRouter(string to, int chainId)
+        {
+            var web3 = _web3Service.GetWeb3InstanceOf(chainId);
+            var factory = await web3.Eth.GetContract(RouterV2.ABI, to).GetFunction("factory").CallAsync<string>();
+            return factory;
         }
 
         //BNB Trade: https://bscscan.com/tx/0x596b80b249a296040d4b48e03ee0cd7396840ca6b45e56ccbccf273b645f41d1#eventlog
@@ -237,10 +250,14 @@ namespace AutotradingSignaler.Core.Web.Background
         private async Task<Dictionary<UnprocessesSwapEvent, RpcRequestResponseBatchItem<EthGetTransactionReceipt, TransactionReceipt>>> GetTransactionReceipts(List<UnprocessesSwapEvent> swapEvents)
         {
             var dict = new Dictionary<UnprocessesSwapEvent, RpcRequestResponseBatchItem<EthGetTransactionReceipt, TransactionReceipt>>();
-            var requests = new Dictionary<Web3, RpcRequestResponseBatch>();
+            var requests = new Dictionary<Nethereum.Web3.Web3, RpcRequestResponseBatch>();
 
             foreach (var swapEvent in swapEvents)
             {
+                if (dict.ContainsKey(swapEvent))
+                {
+                    continue;
+                }
                 var web3 = _web3Service.GetWeb3InstanceOf(swapEvent.chainId);
                 RpcRequestResponseBatch request;
                 if (!requests.ContainsKey(web3))

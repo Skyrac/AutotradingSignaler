@@ -1,0 +1,41 @@
+﻿using Nethereum.ABI.FunctionEncoding.Attributes;
+using Nethereum.Contracts;
+using System.Numerics;
+
+namespace AutotradingSignaler.Contracts.Web3.Contracts;
+
+[Function("getReserves", typeof(GetReserveOfFunctionOutputDTOBase))]
+public class GetReserveOfFunction : FunctionMessage
+{
+
+}
+
+[FunctionOutput]
+public class GetReserveOfFunctionOutputDTOBase : IFunctionOutputDTO
+{
+
+    [Parameter("uint112", "_reserve0", 1)]
+    public virtual BigInteger Reserve0 { get; set; }
+    [Parameter("uint112", "_reserve1", 1)]
+    public virtual BigInteger Reserve1 { get; set; }
+}
+
+[Function("token0", "address")]
+public class GetToken0OfFunction : FunctionMessage
+{
+
+}
+
+[Function("token1", "address")]
+public class GetToken1OfFunction : FunctionMessage
+{
+
+}
+
+[FunctionOutput]
+public class GetTokenOfFunctionOutputDTOBase : IFunctionOutputDTO
+{
+
+    [Parameter("address", "", 1)]
+    public virtual string TokenAddress { get; set; }
+}

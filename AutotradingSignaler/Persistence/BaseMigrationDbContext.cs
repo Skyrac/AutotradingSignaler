@@ -9,6 +9,7 @@ namespace AutotradingSignaler.Persistence
         public DbSet<Token> Tokens { get; set; }
         public DbSet<Trade> Trades { get; set; }
         public DbSet<Watchlist> Watchlist { get; set; }
+        public DbSet<TradingPlattform> TradingPlattforms { get; set; }
         public BaseMigrationDbContext(DbContextOptions<BaseMigrationDbContext> options, IUserService user) : base(options, user)
         {
         }

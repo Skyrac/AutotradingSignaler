@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Numerics;
+using System.Text.Json;
 
 namespace _1InchApi
 {
@@ -29,6 +30,32 @@ namespace _1InchApi
 
             var tokenList = tokens.Values.ToList();
             return tokenList;
+        }
+
+        public static async Task<QuoteData?> GetQuote(Chain chainId, string fromToken, string toToken, double amount, int decimals)
+        {
+            var onChainAmount = new BigInteger(amount * Math.Pow(10, decimals));
+            if(fromToken == "0x0000000000000000000000000000000000000000")
+            {
+                fromToken = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            } else if(toToken == "0x0000000000000000000000000000000000000000")
+            {
+                toToken = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            }
+            string apiUrl = $"https://api.1inch.io/v5.0/{(int)chainId}/quote?" +
+                $"fromTokenAddress={fromToken}" +
+                $"&toTokenAddress={toToken}" +
+                $"&amount={onChainAmount}";
+
+            HttpResponseMessage response = await client.GetAsync(apiUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"API request failed with status code {response.StatusCode}");
+            }
+
+            string responseContent = await response.Content.ReadAsStringAsync();
+            return JsonSerializer.Deserialize<QuoteData>(responseContent);
+
         }
     }
 }

@@ -45,7 +45,15 @@ public class Web3Service
                     {
                         Name = "Binance Coin",
                         Symbol = "BNB",
-                        Decimals = 18
+                        Decimals = 18,
+                        Address = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+                    },
+                    StableCoin = new BlockchainCurrency
+                    {
+                        Name = "Binance-Peg BSC-USD",
+                        Symbol = "BUSD",
+                        Decimals = 18,
+                        Address = "0x55d398326f99059fF775485246999027B3197955"
                     }
                 }
             }

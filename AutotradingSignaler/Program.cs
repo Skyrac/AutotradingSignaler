@@ -7,6 +7,7 @@ using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3;
 using AutotradingSignaler.Core.Services.Interfaces;
 using AutotradingSignaler.Core.Services;
+using AutotradingSignaler.Core.Web3.Background;
 
 var builder = WebApplication.CreateBuilder(args);
 var keyVaultEndpoint = new Uri(builder.Configuration["AzureKeyVaultEndpoint"]!);
@@ -25,7 +26,9 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IUserService, UserService>();
 
 builder.Services.AddSingleton<Web3Service>();
-builder.Services.AddHostedService<WalletTransferBackgroundSync>();
+//builder.Services.AddHostedService<WalletTransferBackgroundSync>();
+builder.Services.AddHostedService<TokenPriceUpdaterBackgroundService>();
+
 
 
 builder.Services.AddPersistence<BaseMigrationDbContext, IWeb3UnitOfWork, Web3UnitOfWork>(builder.Configuration);

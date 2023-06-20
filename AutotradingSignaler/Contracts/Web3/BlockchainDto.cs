@@ -9,6 +9,7 @@ public class BlockchainDto
     public string Explorer { get; set; }
     public string Coin { get; set; }
     public BlockchainCurrency NativeCurrency { get; set; }
+    public BlockchainCurrency StableCoin { get; set; }
 }
 
 public class BlockchainCurrency
@@ -16,4 +17,5 @@ public class BlockchainCurrency
     public string Name { get; set; }
     public string Symbol { get; set; }
     public int Decimals { get; set; }
+    public string Address { get; set; } = "0x0000000000000000000000000000000000000000";
 }

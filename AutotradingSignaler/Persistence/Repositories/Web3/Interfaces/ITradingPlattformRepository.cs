@@ -3,6 +3,6 @@ using AutotradingSignaler.Persistence.Repositories.Interfaces;
 
 namespace AutotradingSignaler.Persistence.Repositories.Web3.Interfaces;
 
-public interface ITradeRepository : IRepository<Trade>
+public interface ITradingPlattformRepository : IRepository<TradingPlattform>
 {
 }
