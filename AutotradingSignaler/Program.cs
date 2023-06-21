@@ -26,7 +26,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IUserService, UserService>();
 
 builder.Services.AddSingleton<Web3Service>();
-//builder.Services.AddHostedService<WalletTransferBackgroundSync>();
+builder.Services.AddHostedService<WalletTransferBackgroundSync>();
 builder.Services.AddHostedService<TokenPriceUpdaterBackgroundService>();
 
 

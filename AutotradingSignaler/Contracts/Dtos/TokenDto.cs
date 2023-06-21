@@ -7,5 +7,6 @@ namespace AutotradingSignaler.Contracts.Dtos
     public class TokenDto : Token
     {
         public decimal Balance { get; set; }
+        public double Price { get; set; }
     }
 }

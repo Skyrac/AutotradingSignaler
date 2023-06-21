@@ -16,5 +16,6 @@ public class Token : BaseEntity
     public string Symbol { get; set; }
     public int Decimals { get; set; }
     public int ChainId { get; set; }
+    public double Price { get; set; } = 0;
     public string? LogoURI { get; set; }
 }

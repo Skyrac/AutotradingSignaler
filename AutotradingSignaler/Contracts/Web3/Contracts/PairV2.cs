@@ -39,3 +39,17 @@ public class GetTokenOfFunctionOutputDTOBase : IFunctionOutputDTO
     [Parameter("address", "", 1)]
     public virtual string TokenAddress { get; set; }
 }
+
+[Function("totalSupply", "uint256")]
+public class GetTotalSupplyOfFunction : FunctionMessage
+{
+
+}
+
+[FunctionOutput]
+public class GetTotalSupplyOfFunctionOutputDTOBase : IFunctionOutputDTO
+{
+
+    [Parameter("uint256", "", 1)]
+    public virtual string TotalSupply { get; set; }
+}

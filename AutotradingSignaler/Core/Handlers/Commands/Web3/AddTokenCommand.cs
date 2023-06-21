@@ -1,12 +1,11 @@
-﻿using AutotradingSignaler.Contracts.Data;
-using AutotradingSignaler.Contracts.Dtos;
+﻿using _1InchApi;
+using AutotradingSignaler.Contracts.Data;
 using AutotradingSignaler.Core.Web;
+using AutotradingSignaler.Core.Web3.Background;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
-using Mapster;
 using MediatR;
 using Nethereum.Contracts.QueryHandlers.MultiCall;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
-using static Azure.Core.HttpHeader;
 
 namespace AutotradingSignaler.Core.Handlers.Commands.Web3
 {
@@ -41,12 +40,36 @@ namespace AutotradingSignaler.Core.Handlers.Commands.Web3
                 {
                     return null;
                 }
+                await AddTokenPriceData(token, request.ChainId);
                 _repository.Tokens.Add(token);
                 _repository.Commit();
             }
 
             return token;
 
+        }
+
+        private async Task AddTokenPriceData(Token token, int chainId)
+        {
+            var web3 = _web3Service.GetWeb3InstanceOf(chainId);
+            var chainInfo = _web3Service.GetBlockchainInfoOf(chainId);
+            if (web3 == null)
+            {
+                //TODO: Throw error
+                return;
+            }
+
+            if (chainInfo.StableCoin == null)
+            {
+                return;
+            }
+            //Get Token Price from Database
+            var price = await OneInchApiWrapper.GetQuote((Chain)chainId, chainInfo.NativeCurrency.Address, chainInfo.StableCoin.Address!, 1, chainInfo.NativeCurrency.Decimals);
+            var nativeTokenPrice = double.Parse(price.toTokenAmount) / Math.Pow(10, chainInfo.NativeCurrency.Decimals);
+            //var pairs = await TokenPriceUpdaterBackgroundService.GetPairs(new List<Token> { token }, web3, 56, chainInfo.NativeCurrency.Address, _repository.TradingPlattforms.Where(t => t.ChainId == chainId && t.IsValid).GetAll().ToList());
+            //var reserves = await TokenPriceUpdaterBackgroundService.GetReserves(pairs, web3);
+            //var tokenPrices = TokenPriceUpdaterBackgroundService.CalculateBestPrice(chainInfo, nativeTokenPrice, reserves);
+            //token.Price = tokenPrices.Keys.FirstOrDefault()?.Price ?? 0;
         }
 
         private async Task<Token?> RetrieveTokenData(string address, int chainId)

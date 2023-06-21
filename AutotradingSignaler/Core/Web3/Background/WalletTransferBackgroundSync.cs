@@ -2,9 +2,11 @@
 using AutotradingSignaler.Contracts.Web3.Contracts;
 using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
+using AutotradingSignaler.Persistence.Repositories;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using MediatR;
 using Nethereum.Contracts;
+using Nethereum.Contracts.QueryHandlers.MultiCall;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.Client;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
@@ -12,6 +14,7 @@ using Nethereum.RPC.Eth.DTOs;
 using Nethereum.RPC.Eth.Transactions;
 using Nethereum.RPC.Reactive.Eth.Subscriptions;
 using Nethereum.Util;
+using System.Collections;
 using System.Collections.Concurrent;
 
 namespace AutotradingSignaler.Core.Web.Background
@@ -35,7 +38,7 @@ namespace AutotradingSignaler.Core.Web.Background
 
         protected override async Task ExecuteAsync(CancellationToken cancellationToken)
         {
-
+            await Task.Delay(6000);
             var subs = new List<EthLogsObservableSubscription>();
             var unprocessed = new List<UnprocessesSwapEvent>();
             var counter = 0;
@@ -57,7 +60,14 @@ namespace AutotradingSignaler.Core.Web.Background
                         unprocessed.Add(unprocessedEvent);
                         if (_unprocessedSwapEvents.Count <= 0 || unprocessed.Count >= 100)
                         {
-                            await ProcessSwapEvents(unprocessed, cancellationToken);
+                            try
+                            {
+                                await ProcessSwapEvents(unprocessed, cancellationToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError($"Exception in BackgroundService while ProcessingSwapEvents: {nameof(WalletTransferBackgroundSync)} - {ex?.InnerException?.Message ?? ex?.Message}");
+                            }
                         }
 
                     }
@@ -95,15 +105,22 @@ namespace AutotradingSignaler.Core.Web.Background
             return counter;
         }
 
+        private List<TradingPlattform> GetTradingPlattforms(List<string> routers)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+            return repository.TradingPlattforms.Where(t => routers.Contains(t.Router)).GetAll().ToList();
+        }
+
         private async Task ProcessSwapEvents(List<UnprocessesSwapEvent> unprocessed, CancellationToken cancellationToken)
         {
             await Task.Delay(500);
             var receiptDict = await GetTransactionReceipts(unprocessed);
-            using var scope = _scopeFactory.CreateScope();
-            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
-
             var allPlattforms = receiptDict.Values.Where(u => u.Response != null).Select(u => u.Response.To).Distinct().ToList();
-            var existingPlattforms = repository.TradingPlattforms.Where(t => allPlattforms.Contains(t.Router)).GetAll().ToList();
+            var existingPlattforms = GetTradingPlattforms(allPlattforms);
+            var foundPlattforms = receiptDict.Where(t => t.Value != null && t.Value.Response != null && !t.Value.HasError).Select(v => new TradingPlattform { Router = v.Value.Response.To, ChainId = v.Key.chainId }).Distinct().ToList();
+            existingPlattforms.AddRange(await StoreNewPlattforms(existingPlattforms, foundPlattforms));
+            var trades = new List<Trade>();
             foreach (var result in receiptDict)
             {
                 if (result.Value.HasError || result.Value.Response == null)
@@ -120,12 +137,62 @@ namespace AutotradingSignaler.Core.Web.Background
 
                 if (fromLog != null && toLog != null)
                 {
-                    await ProcessTradeInformation(result.Key, receipt, from, to, fromLog, toLog, repository, allPlattforms, existingPlattforms, cancellationToken);
+                    try
+                    {
+                        var trade = await ProcessTradeInformation(result.Key, receipt, from, to, fromLog, toLog, allPlattforms, existingPlattforms, cancellationToken);
+                        if (trade != null)
+                        {
+                            trades.Add(trade);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"Exception in BackgroundService while processing trade information: {nameof(WalletTransferBackgroundSync)} - {ex?.InnerException?.Message ?? ex?.Message}");
+                    }
                 }
             }
+            using var scope = _scopeFactory.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+            var newTrades = trades.Select(t => t.TxHash).ToList();
+            var existingTrades = repository.Trades.Where(t => newTrades.Contains(t.TxHash)).GetAll().Select(t => new { t.ChainId, t.TxHash });
 
+            foreach (var trade in trades.Where(t => !existingTrades.Any(e => e.ChainId == t.ChainId && e.TxHash == t.TxHash)))
+            {
+                _logger.LogInformation($"New trade entry on chain {trade.ChainId} for tx {trade.TxHash}");
+                repository.Trades.Add(trade);
+            }
             repository.Commit();
             unprocessed.Clear();
+        }
+
+        private async Task<IEnumerable<TradingPlattform>> StoreNewPlattforms(List<TradingPlattform> existingPlattforms, List<TradingPlattform> foundPlattforms)
+        {
+            var newPlattforms = foundPlattforms.Where(p => !existingPlattforms.Any(e => e.Router.Equals(p.Router, StringComparison.OrdinalIgnoreCase) && e.ChainId == p.ChainId));
+            if (newPlattforms.Any())
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+                foreach (var plattform in newPlattforms)
+                {
+                    try
+                    {
+                        plattform.Factory = await GetFactoryFromRouter(plattform.Router, plattform.ChainId);
+                        //Check if every required function is available
+
+                        if(plattform.Factory == null)
+                        {
+                            continue;
+                        }
+                        repository.TradingPlattforms.Add(plattform);
+                    }
+                    catch (Exception ex)
+                    {
+
+                    }
+                }
+                repository.Commit();
+            }
+            return newPlattforms;
         }
 
         private void RetrieveTradeInformation(TransactionReceipt receipt, string from, string to, ref EventLog<TransferEventDTO> fromLog, ref EventLog<TransferEventDTO> toLog)
@@ -161,46 +228,28 @@ namespace AutotradingSignaler.Core.Web.Background
             }
         }
 
-        private async Task ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, IWeb3UnitOfWork repository, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
+        private async Task<Trade> ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
         {
-
-            if (repository.Trades.Any(t => t.TxHash == receipt.TransactionHash && t.ChainId == unprocessedEvent.chainId))
-            {
-                return;
-            }
             var tokenInserted = fromLog!.Log.Address;
             var tokenReceived = toLog!.Log.Address;
             var tokenIn = await GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
             var tokenOut = await GetTokenData(tokenReceived, unprocessedEvent.chainId, cancellationToken);
-            var plattform = existingPlattforms.FirstOrDefault(e => e.Router.Equals(to, StringComparison.OrdinalIgnoreCase))
-                ?? new TradingPlattform
-                {
-                    Router = to,
-                    Factory = await GetFactoryFromRouter(to, unprocessedEvent.chainId),
-                    ChainId = unprocessedEvent.chainId
-                };
-
-            if (string.IsNullOrEmpty(plattform.Factory))
-            {
-                plattform.IsValid = false;
-            }
-
+            var plattform = existingPlattforms.FirstOrDefault(p => p.ChainId == unprocessedEvent.chainId && p.Router.Equals(to, StringComparison.OrdinalIgnoreCase));
             var newEntry = new Trade
             {
                 Trader = from,
-                Plattform = plattform,
-                PlattformId = plattform.Id,
+                PlattformId = plattform?.Id,
                 TokenIn = tokenIn.Address,
                 TokenOut = tokenOut.Address,
+                TokenInPrice = tokenIn.Price,
+                TokenOutPrice = tokenOut.Price,
                 TokenInAmount = UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
                 TokenOutAmount = UnitConversion.Convert.FromWei(toLog.Event.Value, tokenOut.Decimals),
                 ChainId = unprocessedEvent.chainId,
                 TxHash = receipt.TransactionHash
             };
 
-
-            repository.Trades.Add(newEntry);
-            _logger.LogInformation($"New trade entry on chain {newEntry.ChainId} for tx {newEntry.TxHash}");
+            return newEntry;
         }
 
         private async Task<string> GetFactoryFromRouter(string to, int chainId)
