@@ -57,8 +57,8 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
                         tradingPlattformList = _unitOfWork.TradingPlattforms.Where(tp => tp.ChainId == chainInfo.ChainId && tp.IsValid).GetAll().ToList();
                     }
                     //get pairs
-                    var pairDict = await GetPairs(tokens, web3Instance.Value, chainInfo.ChainId, chainInfo.NativeCurrency.Address, tradingPlattformList);
-                    var reservesDict = await GetReserves(pairDict, web3Instance.Value);
+                    var pairDict = await GetPairsV2(tokens, web3Instance.Value, chainInfo.ChainId, chainInfo.NativeCurrency.Address, tradingPlattformList.Where(tp => tp.Version != PlattformVersion.V3).ToList());
+                    var reservesDict = await GetReserves(pairDict, web3Instance.Value);     //Only valid for V2
                     Dictionary<Token, List<TokenPrice>> priceDict = CalculateBestPrice(chainInfo, nativeTokenPrice, reservesDict);
                     var nativeToken = tokens.FirstOrDefault(t => t.Address == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
                     var wrappedNativeToken = tokens.FirstOrDefault(t => t.Address.Equals(chainInfo.NativeCurrency.Address, StringComparison.OrdinalIgnoreCase));
@@ -77,6 +77,15 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
         }
     }
 
+    public static void GetTokenPriceV3()
+    {
+        /*
+         * var number_1 =JSBI.BigInt(sqrtPriceX96 sqrtPriceX96 (1e(decimals_token_0))/(1e(decimals_token_1))/JSBI.BigInt(2) ** (JSBI.BigInt(192)); this is wrong! Precision calculation is error.
+var number_1 =JSBI.BigInt(sqrtPriceX96 * (1e(decimals_token_0))/(1e(decimals_token_1)) ** 2 / JSBI.BigInt(2) ** (JSBI.BigInt(192));
+This is True！
+         * 
+         */
+    }
     public static Dictionary<Token, List<TokenPrice>> CalculateBestPrice(BlockchainDto chainInfo, double nativeTokenPrice, Dictionary<Token, List<ReserveCall>> reservesDict)
     {
         var priceDict = new Dictionary<Token, List<TokenPrice>>();
@@ -102,15 +111,6 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
 
     public static TokenPrice GetTokenPrice(Token token, BlockchainCurrency nativeToken, ReserveCall reserve, double nativeTokenPrice)
     {
-        //    (uint256 res0, uint256 res1,) = pair.getReserves();
-        //    if (res0 == 0 && res1 == 0)
-        //    {
-        //        return 0;
-        //    }
-        //    ERC20 tokenB = address(pair.token0()) == address(coin) ? ERC20(pair.token1()) : ERC20(pair.token1());
-        //    uint256 mainRes = address(pair.token0()) == address(coin) ? res1 : res0;
-        //    uint256 secondaryRes = mainRes == res0 ? res1 : res0;
-        //    return (mainRes * (10 * *tokenB.decimals())) / secondaryRes;
         var tokenBDecimals = nativeToken.Decimals;
         var tokenB = new Rational(token.Address.Equals(reserve.token0.Output?.TokenAddress, StringComparison.OrdinalIgnoreCase) ?
                                 reserve.reserve.Output.Reserve1
@@ -129,51 +129,6 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
         var liquidity = (double)(tokenB / Rational.Pow(10, nativeToken.Decimals)) * nativeTokenPrice + (double)(tokenA / Rational.Pow(10, token.Decimals == 0 ? 18 : token.Decimals)) * price;
         return new TokenPrice(price, liquidity);
     }
-
-    //function getCoinAmount(address _pair, address _coinOfInterest, uint256 _amount) public view returns(uint256)
-    //{
-    //    IUniswapV2Pair pair = IUniswapV2Pair(_pair);
-    //    if (address(pair) == address(0))
-    //    {
-    //        return 0;
-    //    }
-    //    bool coin1IsOfInterest = pair.token0() == _coinOfInterest;
-    //    bool coin2IsOfInterest = pair.token1() == _coinOfInterest;
-    //    (uint256 res0, uint256 res1,) = pair.getReserves();
-    //    if ((res0 == 0 && res1 == 0) || (!coin1IsOfInterest && !coin2IsOfInterest))
-    //    {
-    //        return 0;
-    //    }
-    //    uint256 totalSupply = pair.totalSupply();
-    //    return _amount.mul(coin1IsOfInterest ? res0 : res1).div(totalSupply);
-    //}
-
-    ///* =====================================================================================================================
-    //                                                Utility Functions
-    //===================================================================================================================== */
-    //function getTokenPrice() public returns(uint256)
-    //{
-    //    address coinLpAddress = coin.liquidityPair();
-    //    if (coinLpAddress != lpAddress)
-    //    {
-    //        lpAddress = coinLpAddress;
-    //        hourlyIndex = 0;
-    //        lastAveragePrice = 0;
-    //        previousAveragePrice = 0;
-    //    }
-    //    IUniswapV2Pair pair = IUniswapV2Pair(lpAddress);
-    //    (uint256 res0, uint256 res1,) = pair.getReserves();
-    //    if (res0 == 0 && res1 == 0)
-    //    {
-    //        return 0;
-    //    }
-    //    ERC20 tokenB = address(pair.token0()) == address(coin) ? ERC20(pair.token1()) : ERC20(pair.token1());
-    //    uint256 mainRes = address(pair.token0()) == address(coin) ? res1 : res0;
-    //    uint256 secondaryRes = mainRes == res0 ? res1 : res0;
-    //    return (mainRes * (10 * *tokenB.decimals())) / secondaryRes;
-    //}
-
-
 
     public static async Task<Dictionary<Token, List<ReserveCall>>> GetReserves(Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>? pairDict, Nethereum.Web3.Web3 web3)
     {
@@ -197,12 +152,12 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
                 callist.Add(call3);
             }
         }
-        await web3.Eth.GetMultiQueryHandler().MultiCallAsync(500, callist.ToArray()).ConfigureAwait(false);
+        await web3.Eth.GetMultiQueryHandler().MultiCallAsync(1000, callist.ToArray()).ConfigureAwait(false);
 
         return reservesDict;
     }
 
-    public static async Task<Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>?> GetPairs(IList<Token> tokens, Nethereum.Web3.Web3 web3, int chainId, string chainNativeTokenAddress, IList<TradingPlattform> tradingPlattformList)
+    public static async Task<Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>?> GetPairsV2(IList<Token> tokens, Nethereum.Web3.Web3 web3, int chainId, string chainNativeTokenAddress, IList<TradingPlattform> tradingPlattformList)
     {
         var pairDict = new Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>();
         var finalizedDict = new Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>();
@@ -228,18 +183,24 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
                 }
 
                 //TODO: If we want to store the liqudity and price of a token on a given trading plattform
-                var message = new GetPairOfFunction()
-                {
-                    TokenA = token.Address,
-                    TokenB = chainNativeTokenAddress
-                };
-                var call = new MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>(message, plattform.Factory);
+                var call = plattform.Version == PlattformVersion.V3 ?
+                    new MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>(new GetPairV3OfFunction()
+                    {
+                        TokenA = token.Address,
+                        TokenB = chainNativeTokenAddress,
+                        Fee = plattform.Fee
+                    }, plattform.Factory)
+                    : new MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>(new GetPairOfFunction()
+                    {
+                        TokenA = token.Address,
+                        TokenB = chainNativeTokenAddress
+                    }, plattform.Factory);
                 pairDict[token].Add(call);
                 callist.Add(call);
             }
             try
             {
-                await web3.Eth.GetMultiQueryHandler().MultiCallAsync(500, callist.ToArray()).ConfigureAwait(false);
+                await web3.Eth.GetMultiQueryHandler().MultiCallAsync(1000, callist.ToArray()).ConfigureAwait(false);
                 foreach (var entry in pairDict)
                 {
                     if (!finalizedDict.ContainsKey(entry.Key))
@@ -257,7 +218,11 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
             catch (Exception ex)
             {
                 //Failure on Plattform
-
+                if (ex.Message.Equals("Smart contract error: Multicall3: call failed"))
+                {
+                    //TODO: Plattform invalid?
+                    Console.WriteLine($"Plattform {plattform.Factory} is invalid");
+                }
                 pairDict.Clear();
                 callist.Clear();
             }
@@ -283,6 +248,7 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
         {
             _unitOfWork.Tokens.Update(token);
         }
+        //TODO: Store in Historical Data?
         //_unitOfWork.Tokens.Update(tokens.ToArray());
         _unitOfWork.Commit();
     }

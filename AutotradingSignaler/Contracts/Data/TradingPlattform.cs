@@ -12,5 +12,14 @@ namespace AutotradingSignaler.Contracts.Data
         public int ChainId { get; set; }
         public bool IsValid { get; set; } = true;
         public string? Factory { get; set; }
+        public PlattformVersion Version { get; set; }
+        public int Fee { get; set; } = 500;
+    }
+
+    public enum PlattformVersion
+    {
+        V1,
+        V2,
+        V3
     }
 }

@@ -7,7 +7,7 @@ namespace AutotradingSignaler.Contracts.Dtos
     public class TradeDto
     {
         public string Trader { get; set; }
-        public string Plattform { get; set; }
+        public TradingPlattformDto Plattform { get; set; }
         public string TokenIn { get; set; }
         public string TokenOut { get; set; }
         public decimal TokenInAmount { get; set; }
@@ -15,7 +15,10 @@ namespace AutotradingSignaler.Contracts.Dtos
         public int ChainId { get; set; }
         public string TxHash { get; set; }
         public double Profit { get; set; }
-        public TradeDto? Sell { get; set; }
+        public bool IsBuy { get; set; }
+        public decimal TokensSold { get; set; }
+        public double TokenInPrice { get; set; }
+        public double TokenOutPrice { get; set; }
 
         [AdaptMember(nameof(Trade.Created))]
         public DateTime Timestamp { get; set; }

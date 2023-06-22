@@ -15,6 +15,13 @@ public class GetPairOfFunction : FunctionMessage
 [FunctionOutput]
 public class GetPairOfFunctionOutputDTOBase : IFunctionOutputDTO
 {
-    [Parameter("address", "_pair", 1)]
+    [Parameter("address", "", 1)]
     public virtual string Pair { get; set; }
+}
+
+[Function("getPair", "address")]
+public class GetPairV3OfFunction : GetPairOfFunction
+{
+    [Parameter("uint24", "_fee", 3)]
+    public virtual int Fee { get; set; } = 500;
 }

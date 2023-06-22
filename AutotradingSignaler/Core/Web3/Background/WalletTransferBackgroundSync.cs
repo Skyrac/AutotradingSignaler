@@ -2,11 +2,9 @@
 using AutotradingSignaler.Contracts.Web3.Contracts;
 using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
-using AutotradingSignaler.Persistence.Repositories;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using MediatR;
 using Nethereum.Contracts;
-using Nethereum.Contracts.QueryHandlers.MultiCall;
 using Nethereum.Contracts.Standards.ERC20.ContractDefinition;
 using Nethereum.JsonRpc.Client;
 using Nethereum.JsonRpc.WebSocketStreamingClient;
@@ -14,7 +12,6 @@ using Nethereum.RPC.Eth.DTOs;
 using Nethereum.RPC.Eth.Transactions;
 using Nethereum.RPC.Reactive.Eth.Subscriptions;
 using Nethereum.Util;
-using System.Collections;
 using System.Collections.Concurrent;
 
 namespace AutotradingSignaler.Core.Web.Background
@@ -26,7 +23,7 @@ namespace AutotradingSignaler.Core.Web.Background
         private readonly Web3Service _web3Service;
         private readonly ConcurrentQueue<UnprocessesSwapEvent> _unprocessedSwapEvents = new ConcurrentQueue<UnprocessesSwapEvent>();
         private readonly List<Watchlist> _watchlist = new List<Watchlist>();
-
+        private readonly List<(StreamingWebSocketClient, EthLogsObservableSubscription)> subs = new List<(StreamingWebSocketClient, EthLogsObservableSubscription)>();
         private record UnprocessesSwapEvent(int chainId, FilterLog log);
 
         public WalletTransferBackgroundSync(ILogger<WalletTransferBackgroundSync> logger, Web3Service web3Service, IServiceScopeFactory scopeFactory)
@@ -39,19 +36,22 @@ namespace AutotradingSignaler.Core.Web.Background
         protected override async Task ExecuteAsync(CancellationToken cancellationToken)
         {
             await Task.Delay(6000);
-            var subs = new List<EthLogsObservableSubscription>();
             var unprocessed = new List<UnprocessesSwapEvent>();
             var counter = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
+                    if (subs.Any(sub =>
+                    {
+                        return sub.Item1.WebSocketState != System.Net.WebSockets.WebSocketState.Open;
+                    }))
+                    {
+                        await RestartSubs();
+                    }
                     if (!subs.Any())
                     {
-                        foreach (var chain in _web3Service.GetWeb3Instances())
-                        {
-                            subs.Add(await GetLogsTokenTransfer_Observable_Subscription(chain.Key));
-                        }
+                        await RestartSubs();
                     }
                     //TODO: Check for new findings and execute process like notification  or trade execution
 
@@ -76,12 +76,34 @@ namespace AutotradingSignaler.Core.Web.Background
                 catch (Exception ex)
                 {
                     _logger.LogError($"Exception in BackgroundService: {nameof(WalletTransferBackgroundSync)} - {ex?.InnerException?.Message ?? ex?.Message}");
-                    subs.ForEach(async sub => await sub.UnsubscribeAsync());
-                    await Task.Delay(TimeSpan.FromSeconds(20));
-                    subs.Clear();
+
                 }
 
                 counter = CheckAndUpdateWatchlist(counter);
+            }
+        }
+
+        private async Task RestartSubs()
+        {
+            if (subs.Any())
+            {
+                subs.ForEach(async sub =>
+                {
+                    try
+                    {
+                        await sub.Item1.StopAsync();
+                    }
+                    catch (Exception ex)
+                    {
+
+                    }
+                });
+                await Task.Delay(TimeSpan.FromSeconds(3));
+                subs.Clear();
+            }
+            foreach (var chain in _web3Service.GetWeb3Instances())
+            {
+                subs.Add(await GetLogsTokenTransfer_Observable_Subscription(chain.Key));
             }
         }
 
@@ -177,12 +199,42 @@ namespace AutotradingSignaler.Core.Web.Background
                     try
                     {
                         plattform.Factory = await GetFactoryFromRouter(plattform.Router, plattform.ChainId);
-                        //Check if every required function is available
-
-                        if(plattform.Factory == null)
+                        if (plattform.Factory == null)
                         {
                             continue;
                         }
+                        //Check if every required function is available
+                        var web3 = _web3Service.GetWeb3InstanceOf(plattform.ChainId);
+                        var chainInfo = _web3Service.GetBlockchainInfoOf(plattform.ChainId);
+                        try
+                        {
+                            var isV2 = web3.Eth.GetContractQueryHandler<GetPairOfFunction>().QueryAsync<GetPairOfFunctionOutputDTOBase>(plattform.Factory, new GetPairOfFunction()
+                            {
+                                TokenA = chainInfo.NativeCurrency.Address,
+                                TokenB = chainInfo.StableCoin.Address
+                            });
+
+                            plattform.Version = PlattformVersion.V3;
+                        }
+                        catch (Exception ex)
+                        {
+                            try
+                            {
+                                var isV3 = web3.Eth.GetContractQueryHandler<GetPairV3OfFunction>().QueryAsync<GetPairOfFunctionOutputDTOBase>(plattform.Factory, new GetPairV3OfFunction()
+                                {
+                                    TokenA = chainInfo.NativeCurrency.Address,
+                                    TokenB = chainInfo.StableCoin.Address,
+                                    Fee = 500
+                                });
+                                plattform.Version = PlattformVersion.V3;
+                            }
+                            catch (Exception exV3)
+                            {
+                                continue;
+                            }
+                        }
+
+
                         repository.TradingPlattforms.Add(plattform);
                     }
                     catch (Exception ex)
@@ -228,28 +280,83 @@ namespace AutotradingSignaler.Core.Web.Background
             }
         }
 
-        private async Task<Trade> ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
+        private async Task<Trade?> ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
         {
+            var chainInfo = _web3Service.GetBlockchainInfoOf(unprocessedEvent.chainId);
             var tokenInserted = fromLog!.Log.Address;
             var tokenReceived = toLog!.Log.Address;
             var tokenIn = await GetTokenData(tokenInserted, unprocessedEvent.chainId, cancellationToken);
             var tokenOut = await GetTokenData(tokenReceived, unprocessedEvent.chainId, cancellationToken);
             var plattform = existingPlattforms.FirstOrDefault(p => p.ChainId == unprocessedEvent.chainId && p.Router.Equals(to, StringComparison.OrdinalIgnoreCase));
-            var newEntry = new Trade
+            using (var scope = _scopeFactory.CreateScope())
             {
-                Trader = from,
-                PlattformId = plattform?.Id,
-                TokenIn = tokenIn.Address,
-                TokenOut = tokenOut.Address,
-                TokenInPrice = tokenIn.Price,
-                TokenOutPrice = tokenOut.Price,
-                TokenInAmount = UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
-                TokenOutAmount = UnitConversion.Convert.FromWei(toLog.Event.Value, tokenOut.Decimals),
-                ChainId = unprocessedEvent.chainId,
-                TxHash = receipt.TransactionHash
-            };
+                var repository = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
+                var openTrades = repository.Trades.Where(t => (t.TokenOutId == tokenIn.Id
+                && t.Trader == from
+                && t.TokensSold < t.TokenOutAmount) || (t.TxHash == receipt.TransactionHash && t.ChainId == unprocessedEvent.chainId)).Sort(System.ComponentModel.ListSortDirection.Ascending, t => t.Created).GetAll();
+                if (openTrades.Any(t => t.TxHash == receipt.TransactionHash))
+                {
+                    return null;
+                }
+                var newEntry = new Trade
+                {
+                    Trader = from,
+                    PlattformId = plattform?.Id,
+                    TokenInId = tokenIn.Id,
+                    TokenOutId = tokenOut.Id,
+                    TokenIn = tokenIn.Address,
+                    TokenOut = tokenOut.Address,
+                    TokenInPrice = tokenIn.Price,
+                    TokenOutPrice = tokenOut.Price,
+                    TokenInAmount = (double)UnitConversion.Convert.FromWei(fromLog.Event.Value, tokenIn.Decimals),
+                    TokenOutAmount = (double)UnitConversion.Convert.FromWei(toLog.Event.Value, tokenOut.Decimals),
+                    ChainId = unprocessedEvent.chainId,
+                    TxHash = receipt.TransactionHash
+                };
 
-            return newEntry;
+                if (openTrades.Any())
+                {
+                    var tokenInAmount = newEntry.TokenInAmount;
+                    bool finished = false;
+                    foreach (var openTrade in openTrades)
+                    {
+                        var remainingTokensToSell = openTrade.TokenOutAmount - openTrade.TokensSold;
+                        double averagePrice = 0;
+                        if (remainingTokensToSell > tokenInAmount)
+                        {
+                            var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
+                            var averagePriceNow = remainingTokensToSell * tokenIn.Price;
+                            averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
+
+
+                            openTrade.TokensSold += remainingTokensToSell;
+
+                        }
+                        else
+                        {
+                            tokenInAmount -= remainingTokensToSell;
+                            //Calculate Average Price
+                            var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
+                            var averagePriceNow = remainingTokensToSell * tokenIn.Price;
+                            averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
+                            openTrade.TokensSold = openTrade.TokenOutAmount;
+                            finished = true;
+                        }
+                        openTrade.AverageSellPrice = averagePrice;
+                        openTrade.Profit = openTrade.AverageSellPrice / openTrade.TokenOutPrice * 100;
+                        repository.Trades.Update(openTrade);
+                        if (finished)
+                        {
+                            break;
+                        }
+                    }
+                    repository.Trades.Add(newEntry);
+                    repository.Commit();
+                    return null;
+                }
+
+                return newEntry;
+            }
         }
 
         private async Task<string> GetFactoryFromRouter(string to, int chainId)
@@ -329,7 +436,7 @@ namespace AutotradingSignaler.Core.Web.Background
             return dict;
         }
 
-        private async Task<EthLogsObservableSubscription> GetLogsTokenTransfer_Observable_Subscription(int chainId)
+        private async Task<(StreamingWebSocketClient, EthLogsObservableSubscription)> GetLogsTokenTransfer_Observable_Subscription(int chainId)
         {
             // ** SEE THE TransferEventDTO class below **
             var blockchainInfo = _web3Service.GetBlockchainInfoOf(chainId);
@@ -338,6 +445,14 @@ namespace AutotradingSignaler.Core.Web.Background
             var filterTransfers = Event<SwapEventV2>.GetEventABI().CreateFilterInput();
 
             var subscription = new EthLogsObservableSubscription(client);
+            client.Error += (sender, ex) =>
+            {
+                _logger.LogError($"Error in Websocket Connection: {ex.Message}");
+                client.StopAsync().Wait();
+                subscription.UnsubscribeAsync().Wait();
+                client.StartAsync().Wait();
+                subscription.SubscribeAsync(filterTransfers).Wait();
+            };
             subscription.GetSubscriptionDataResponsesAsObservable().Subscribe(log =>
             {
                 try
@@ -369,7 +484,6 @@ namespace AutotradingSignaler.Core.Web.Background
 
             // open the web socket connection
             await client.StartAsync();
-
             // begin receiving subscription data
             // data will be received on a background thread
             await subscription.SubscribeAsync(filterTransfers);
@@ -377,7 +491,7 @@ namespace AutotradingSignaler.Core.Web.Background
             //// run for a while
             //await Task.Delay(TimeSpan.FromMinutes(60));
 
-            return subscription;
+            return (client, subscription);
         }
     }
 }
