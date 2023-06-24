@@ -63,17 +63,15 @@ namespace AutotradingSignaler.Core.Handlers.Commands.Web3
             {
                 return;
             }
-            var nativeToken = _repository.Tokens.Where(t => t.Address == chainInfo.NativeCurrency.Address && t.ChainId == chainId).Get();
-            if (nativeToken.Price == 0)
-            {
-                var price = await OneInchApiWrapper.GetQuote((Chain)chainId, chainInfo.NativeCurrency.Address, chainInfo.StableCoin.Address!, 1, chainInfo.NativeCurrency.Decimals);
-                nativeToken.Price = double.Parse(price.toTokenAmount) / Math.Pow(10, chainInfo.NativeCurrency.Decimals);
 
-            }
-            var pairs = await TokenPriceUpdaterBackgroundService.GetPairsV2(new List<Token> { token }, web3, 56, chainInfo.NativeCurrency.Address, _repository.TradingPlattforms.Where(t => t.ChainId == chainId && t.IsValid && t.Version != PlattformVersion.V3).GetAll().ToList());
-            var reserves = await TokenPriceUpdaterBackgroundService.GetReserves(pairs, web3);
-            var tokenPrices = TokenPriceUpdaterBackgroundService.CalculateBestPrice(chainInfo, nativeToken.Price, reserves);
-            token.Price = tokenPrices.Keys.FirstOrDefault()?.Price ?? 0;
+            var tokenPrices = await TokenPriceUpdaterBackgroundService.ProcessTokensAndReceivePriceData(web3,
+                    chainInfo,
+                    new List<Token> { token },
+                    _repository.TradingPlattforms.Where(t => t.ChainId == chainId && t.IsValid)
+                .GetAll()
+                .ToList());
+
+            token.Price = tokenPrices.FirstOrDefault()?.Price ?? 0;
         }
 
         private async Task<Token?> RetrieveTokenData(string address, int chainId)

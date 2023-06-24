@@ -53,3 +53,34 @@ public class GetTotalSupplyOfFunctionOutputDTOBase : IFunctionOutputDTO
     [Parameter("uint256", "", 1)]
     public virtual string TotalSupply { get; set; }
 }
+
+[Function("slot0")]
+public class GetSlot0OfFunction : FunctionMessage
+{
+
+}
+
+[FunctionOutput]
+public class GetSlot0OfFunctionOutputDTOBase : IFunctionOutputDTO
+{
+
+    [Parameter("uint256", "", 1)]
+    public virtual BigInteger SqrtPrice { get; set; }
+}
+
+
+[Function("liquidity")]
+public class GetLiquidityOfFunction : FunctionMessage
+{
+
+}
+
+[FunctionOutput]
+public class GetLiquidityOfFunctionOutputDTOBase : IFunctionOutputDTO
+{
+
+    [Parameter("uint128", "", 1)]
+    public virtual BigInteger Liquidity { get; set; }
+}
+
+

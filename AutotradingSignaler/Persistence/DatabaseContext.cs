@@ -14,6 +14,36 @@ namespace Database.Utils.Repositories
             _user = user;
         }
 
+        public override int SaveChanges()
+        {
+            foreach (var item in ChangeTracker.Entries<BaseEntity>().AsEnumerable())
+            {
+                if (item.State == EntityState.Added)
+                {
+                    item.Entity.Created = DateTime.UtcNow;
+                }
+                else if (item.State == EntityState.Modified)
+                {
+                    item.Entity.LastModified = DateTime.UtcNow;
+                }
+            }
+
+            foreach (var item in ChangeTracker.Entries<AuditableEntity>().AsEnumerable())
+            {
+                if (item.State == EntityState.Added)
+                {
+                    item.Entity.Created = DateTime.UtcNow;
+                    item.Entity.CreatedBy = _user.UserId;
+                }
+                else if (item.State == EntityState.Modified)
+                {
+                    item.Entity.LastModified = DateTime.UtcNow;
+                    item.Entity.ModifiedBy = _user.UserId;
+                }
+            }
+            return base.SaveChanges();
+        }
+
         public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
             foreach (var item in ChangeTracker.Entries<BaseEntity>().AsEnumerable())

@@ -2,6 +2,7 @@
 using AutotradingSignaler.Contracts.Web3.Contracts;
 using AutotradingSignaler.Contracts.Web3.Events;
 using AutotradingSignaler.Core.Handlers.Commands.Web3;
+using AutotradingSignaler.Persistence.Repositories;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using MediatR;
 using Nethereum.Contracts;
@@ -161,7 +162,7 @@ namespace AutotradingSignaler.Core.Web.Background
                 {
                     try
                     {
-                        var trade = await ProcessTradeInformation(result.Key, receipt, from, to, fromLog, toLog, allPlattforms, existingPlattforms, cancellationToken);
+                        var trade = await ProcessTradeInformation(result.Key, receipt, from, to, fromLog, toLog, existingPlattforms, cancellationToken);
                         if (trade != null)
                         {
                             trades.Add(trade);
@@ -181,8 +182,8 @@ namespace AutotradingSignaler.Core.Web.Background
             foreach (var trade in trades.Where(t => !existingTrades.Any(e => e.ChainId == t.ChainId && e.TxHash == t.TxHash)))
             {
                 _logger.LogInformation($"New trade entry on chain {trade.ChainId} for tx {trade.TxHash}");
-                repository.Trades.Add(trade);
             }
+            repository.Trades.Add(false, trades.Where(t => !existingTrades.Any(e => e.ChainId == t.ChainId && e.TxHash == t.TxHash)).ToArray());
             repository.Commit();
             unprocessed.Clear();
         }
@@ -190,6 +191,7 @@ namespace AutotradingSignaler.Core.Web.Background
         private async Task<IEnumerable<TradingPlattform>> StoreNewPlattforms(List<TradingPlattform> existingPlattforms, List<TradingPlattform> foundPlattforms)
         {
             var newPlattforms = foundPlattforms.Where(p => !existingPlattforms.Any(e => e.Router.Equals(p.Router, StringComparison.OrdinalIgnoreCase) && e.ChainId == p.ChainId));
+            var addedPlattforms = new List<TradingPlattform>();
             if (newPlattforms.Any())
             {
                 using var scope = _scopeFactory.CreateScope();
@@ -214,7 +216,7 @@ namespace AutotradingSignaler.Core.Web.Background
                                 TokenB = chainInfo.StableCoin.Address
                             });
 
-                            plattform.Version = PlattformVersion.V3;
+                            plattform.Version = PlattformVersion.V2;
                         }
                         catch (Exception ex)
                         {
@@ -234,17 +236,18 @@ namespace AutotradingSignaler.Core.Web.Background
                             }
                         }
 
-
-                        repository.TradingPlattforms.Add(plattform);
+                        addedPlattforms.Add(plattform);
                     }
                     catch (Exception ex)
                     {
 
                     }
                 }
+                repository.TradingPlattforms.Add(true, addedPlattforms.ToArray());
                 repository.Commit();
             }
-            return newPlattforms;
+
+            return addedPlattforms;
         }
 
         private void RetrieveTradeInformation(TransactionReceipt receipt, string from, string to, ref EventLog<TransferEventDTO> fromLog, ref EventLog<TransferEventDTO> toLog)
@@ -280,7 +283,7 @@ namespace AutotradingSignaler.Core.Web.Background
             }
         }
 
-        private async Task<Trade?> ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, List<string> allPlattforms, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
+        private async Task<Trade?> ProcessTradeInformation(UnprocessesSwapEvent unprocessedEvent, TransactionReceipt receipt, string from, string to, EventLog<TransferEventDTO> fromLog, EventLog<TransferEventDTO> toLog, List<TradingPlattform> existingPlattforms, CancellationToken cancellationToken)
         {
             var chainInfo = _web3Service.GetBlockchainInfoOf(unprocessedEvent.chainId);
             var tokenInserted = fromLog!.Log.Address;
@@ -301,7 +304,7 @@ namespace AutotradingSignaler.Core.Web.Background
                 var newEntry = new Trade
                 {
                     Trader = from,
-                    PlattformId = plattform?.Id,
+                    PlattformId = plattform?.Id ?? null,
                     TokenInId = tokenIn.Id,
                     TokenOutId = tokenOut.Id,
                     TokenIn = tokenIn.Address,
@@ -317,33 +320,9 @@ namespace AutotradingSignaler.Core.Web.Background
                 if (openTrades.Any())
                 {
                     var tokenInAmount = newEntry.TokenInAmount;
-                    bool finished = false;
                     foreach (var openTrade in openTrades)
                     {
-                        var remainingTokensToSell = openTrade.TokenOutAmount - openTrade.TokensSold;
-                        double averagePrice = 0;
-                        if (remainingTokensToSell > tokenInAmount)
-                        {
-                            var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
-                            var averagePriceNow = remainingTokensToSell * tokenIn.Price;
-                            averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
-
-
-                            openTrade.TokensSold += remainingTokensToSell;
-
-                        }
-                        else
-                        {
-                            tokenInAmount -= remainingTokensToSell;
-                            //Calculate Average Price
-                            var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
-                            var averagePriceNow = remainingTokensToSell * tokenIn.Price;
-                            averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
-                            openTrade.TokensSold = openTrade.TokenOutAmount;
-                            finished = true;
-                        }
-                        openTrade.AverageSellPrice = averagePrice;
-                        openTrade.Profit = openTrade.AverageSellPrice / openTrade.TokenOutPrice * 100;
+                        var finished = CalculateProfitAndShouldFinish(newEntry, openTrade, ref tokenInAmount);
                         repository.Trades.Update(openTrade);
                         if (finished)
                         {
@@ -357,6 +336,40 @@ namespace AutotradingSignaler.Core.Web.Background
 
                 return newEntry;
             }
+        }
+
+        public static bool CalculateProfitAndShouldFinish(Trade newTrade, Trade openTrade, ref double tokenInAmount)
+        {
+            var finished = false;
+            if (openTrade.TokenOutPrice <= 0)
+            {
+                return false;
+            }
+            var remainingTokensToSell = openTrade.TokenOutAmount - openTrade.TokensSold;
+            double averagePrice = 0;
+            if (remainingTokensToSell > tokenInAmount)
+            {
+                var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
+                var averagePriceNow = remainingTokensToSell * newTrade.TokenInPrice;
+                averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
+
+
+                openTrade.TokensSold += remainingTokensToSell;
+
+            }
+            else
+            {
+                tokenInAmount -= remainingTokensToSell;
+                //Calculate Average Price
+                var averagePriceMult = openTrade.TokensSold * openTrade.AverageSellPrice;
+                var averagePriceNow = remainingTokensToSell * newTrade.TokenInPrice;
+                averagePrice = (averagePriceMult + averagePriceNow) / (openTrade.TokensSold + remainingTokensToSell);
+                openTrade.TokensSold = openTrade.TokenOutAmount;
+                finished = true;
+            }
+            openTrade.AverageSellPrice = averagePrice;
+            openTrade.Profit = openTrade.AverageSellPrice / openTrade.TokenOutPrice * 100 - 100;
+            return finished;
         }
 
         private async Task<string> GetFactoryFromRouter(string to, int chainId)

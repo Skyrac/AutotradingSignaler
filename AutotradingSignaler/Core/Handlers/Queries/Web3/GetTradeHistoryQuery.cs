@@ -30,7 +30,7 @@ namespace AutotradingSignaler.Core.Handlers.Queries.Web3
 
         public Task<TradeHistoryDto> Handle(GetTradeHistoryQuery request, CancellationToken cancellationToken)
         {
-            IRepository<Trade> trades = _repository.Trades.Include(t => t.Plattform);
+            IRepository<Trade> trades = _repository.Trades.Include(t => t.Plattform).Include(t => t.TokenInData).Include(t => t.TokenOutData);
             if (!string.IsNullOrEmpty(request.Trader))
             {
                 trades = trades.Where(t => t.Trader == request.Trader);

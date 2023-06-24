@@ -19,6 +19,8 @@ namespace AutotradingSignaler.Contracts.Dtos
         public decimal TokensSold { get; set; }
         public double TokenInPrice { get; set; }
         public double TokenOutPrice { get; set; }
+        public TokenDto TokenInData { get; set; }
+        public TokenDto TokenOutData { get; set; }
 
         [AdaptMember(nameof(Trade.Created))]
         public DateTime Timestamp { get; set; }

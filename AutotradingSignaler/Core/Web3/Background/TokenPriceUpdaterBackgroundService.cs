@@ -14,11 +14,21 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
     private readonly ILogger<TokenPriceUpdaterBackgroundService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly Web3Service _web3Service;
+    public record BaseReserveCall(
+        MulticallInputOutput<GetToken0OfFunction, GetTokenOfFunctionOutputDTOBase> token0,
+        MulticallInputOutput<GetToken1OfFunction, GetTokenOfFunctionOutputDTOBase> token1
+        );
     public record ReserveCall(
         MulticallInputOutput<GetReserveOfFunction, GetReserveOfFunctionOutputDTOBase> reserve,
         MulticallInputOutput<GetToken0OfFunction, GetTokenOfFunctionOutputDTOBase> token0,
         MulticallInputOutput<GetToken1OfFunction, GetTokenOfFunctionOutputDTOBase> token1
-        );
+        ) : BaseReserveCall(token0, token1);
+    public record ReserveV3Call(
+        MulticallInputOutput<GetSlot0OfFunction, GetSlot0OfFunctionOutputDTOBase> sqrtPriceX96,
+        MulticallInputOutput<GetLiquidityOfFunction, GetLiquidityOfFunctionOutputDTOBase> liquidity,
+        MulticallInputOutput<GetToken0OfFunction, GetTokenOfFunctionOutputDTOBase> token0,
+        MulticallInputOutput<GetToken1OfFunction, GetTokenOfFunctionOutputDTOBase> token1
+        ) : BaseReserveCall(token0, token1);
     public record TokenPrice(
         double price,
         double liquidity
@@ -47,8 +57,6 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
                     {
                         continue;
                     }
-                    var price = await OneInchApiWrapper.GetQuote((Chain)web3Instance.Key, chainInfo.NativeCurrency.Address, chainInfo.StableCoin.Address!, 1, chainInfo.NativeCurrency.Decimals);
-                    var nativeTokenPrice = double.Parse(price.toTokenAmount) / Math.Pow(10, chainInfo.NativeCurrency.Decimals);
                     var tradingPlattformList = new List<TradingPlattform>();
                     var tokens = GetTokens(web3Instance.Key);
                     using (var scope = _scopeFactory.CreateScope())
@@ -57,17 +65,10 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
                         tradingPlattformList = _unitOfWork.TradingPlattforms.Where(tp => tp.ChainId == chainInfo.ChainId && tp.IsValid).GetAll().ToList();
                     }
                     //get pairs
-                    var pairDict = await GetPairsV2(tokens, web3Instance.Value, chainInfo.ChainId, chainInfo.NativeCurrency.Address, tradingPlattformList.Where(tp => tp.Version != PlattformVersion.V3).ToList());
-                    var reservesDict = await GetReserves(pairDict, web3Instance.Value);     //Only valid for V2
-                    Dictionary<Token, List<TokenPrice>> priceDict = CalculateBestPrice(chainInfo, nativeTokenPrice, reservesDict);
-                    var nativeToken = tokens.FirstOrDefault(t => t.Address == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-                    var wrappedNativeToken = tokens.FirstOrDefault(t => t.Address.Equals(chainInfo.NativeCurrency.Address, StringComparison.OrdinalIgnoreCase));
-                    nativeToken.Price = nativeTokenPrice;
-                    wrappedNativeToken.Price = nativeTokenPrice;
-                    priceDict.Add(nativeToken, new List<TokenPrice>());
-                    priceDict.Add(wrappedNativeToken, new List<TokenPrice>());
-                    StoreTokenPrices(priceDict.Keys);
-                    await Task.Delay(60000 * 1);
+
+                    var tokenPrices = await ProcessTokensAndReceivePriceData(web3Instance.Value, chainInfo, tokens, tradingPlattformList);
+                    StoreTokenPrices(tokenPrices);
+                    await Task.Delay(60000 * 5);
                 }
             }
             catch (Exception ex)
@@ -77,41 +78,126 @@ public class TokenPriceUpdaterBackgroundService : BackgroundService
         }
     }
 
-    public static void GetTokenPriceV3()
+    public static async Task<List<Token>> ProcessTokensAndReceivePriceData(Nethereum.Web3.Web3 web3, BlockchainDto chainInfo, IList<Token> tokens, IList<TradingPlattform> tradingPlattforms)
     {
-        /*
-         * var number_1 =JSBI.BigInt(sqrtPriceX96 sqrtPriceX96 (1e(decimals_token_0))/(1e(decimals_token_1))/JSBI.BigInt(2) ** (JSBI.BigInt(192)); this is wrong! Precision calculation is error.
-var number_1 =JSBI.BigInt(sqrtPriceX96 * (1e(decimals_token_0))/(1e(decimals_token_1)) ** 2 / JSBI.BigInt(2) ** (JSBI.BigInt(192));
-This is True！
-         * 
-         */
+        if (!tokens.Any())
+        {
+            return new List<Token>();
+        }
+        var tokenPrices = new Dictionary<Token, List<TokenPrice>>();
+        var price = await OneInchApiWrapper.GetQuote((Chain)chainInfo.ChainId, chainInfo.NativeCurrency.Address, chainInfo.StableCoin.Address!, 1, chainInfo.NativeCurrency.Decimals);
+        var nativeTokenPrice = double.Parse(price.toTokenAmount) / Math.Pow(10, chainInfo.NativeCurrency.Decimals);
+        var reservesDict = await GetPairs(tokens, web3, chainInfo.ChainId, chainInfo.NativeCurrency.Address, tradingPlattforms.DistinctBy(t => t.Factory).ToList());
+        try
+        {
+            //v2
+            foreach (var entry in CalculateBestPrice(chainInfo, nativeTokenPrice, reservesDict))
+            {
+                if (!tokenPrices.ContainsKey(entry.Key))
+                {
+                    tokenPrices.Add(entry.Key, new List<TokenPrice>());
+                }
+                tokenPrices[entry.Key].AddRange(entry.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.ToString());
+        }
+        try
+        {
+            //v3
+            foreach (var entry in CalculateBestPriceV3(chainInfo, nativeTokenPrice, reservesDict))
+            {
+                if (!tokenPrices.ContainsKey(entry.Key))
+                {
+                    tokenPrices.Add(entry.Key, new List<TokenPrice>());
+                }
+                tokenPrices[entry.Key].AddRange(entry.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.ToString());
+        }
+
+
+        foreach (var token in tokenPrices.Keys)
+        {
+            token.Price = tokenPrices[token].MaxBy(t => t.liquidity)?.price ?? 0;
+        }
+
+        var nativeToken = tokens.FirstOrDefault(t => t.Address == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        var wrappedNativeToken = tokens.FirstOrDefault(t => t.Address.Equals(chainInfo.NativeCurrency.Address, StringComparison.OrdinalIgnoreCase));
+        if (nativeToken != null)
+        {
+            nativeToken.Price = nativeTokenPrice;
+            tokenPrices.Add(nativeToken, new List<TokenPrice>());
+        }
+        if (wrappedNativeToken != null)
+        {
+            wrappedNativeToken.Price = nativeTokenPrice;
+            tokenPrices.Add(wrappedNativeToken, new List<TokenPrice>());
+        }
+
+        return tokenPrices.Keys.ToList();
     }
-    public static Dictionary<Token, List<TokenPrice>> CalculateBestPrice(BlockchainDto chainInfo, double nativeTokenPrice, Dictionary<Token, List<ReserveCall>> reservesDict)
+
+    public static Dictionary<Token, List<TokenPrice>> CalculateBestPrice(BlockchainDto chainInfo, double nativeTokenPrice, Dictionary<Token, List<BaseReserveCall>> reservesDict)
     {
         var priceDict = new Dictionary<Token, List<TokenPrice>>();
+
         foreach (var token in reservesDict.Keys)
         {
-            priceDict.Add(token, new List<TokenPrice>());
-            foreach (var reserveCall in reservesDict[token])
+            try
             {
-                var tokenPriceResult = GetTokenPrice(token, chainInfo.NativeCurrency, reserveCall, nativeTokenPrice);
-                if (tokenPriceResult.price == 0 || tokenPriceResult.liquidity == 0)
+                priceDict.Add(token, new List<TokenPrice>());
+                foreach (var entry in reservesDict[token])
                 {
-                    continue;
+                    if (entry is not ReserveCall reserveCall) { continue; }
+                    var tokenPriceResult = GetTokenPrice(token, chainInfo.NativeCurrency, reserveCall, nativeTokenPrice);
+                    if (tokenPriceResult.price == 0 || tokenPriceResult.liquidity == 0)
+                    {
+                        continue;
+                    }
+                    priceDict[token].Add(tokenPriceResult);
+                    //_logger.LogInformation("Price Update for Token: {0} {1} with Total Liquidity {2}", token.Name, tokenPriceResult.price, tokenPriceResult.liquidity);
                 }
-                priceDict[token].Add(tokenPriceResult);
-                //_logger.LogInformation("Price Update for Token: {0} {1} with Total Liquidity {2}", token.Name, tokenPriceResult.price, tokenPriceResult.liquidity);
-            }
 
-            token.Price = priceDict[token].MaxBy(t => t.liquidity)?.price ?? 0;
+            }
+            catch (Exception ex)
+            {
+
+            }
         }
 
         return priceDict;
     }
 
+    public static Dictionary<Token, List<TokenPrice>> CalculateBestPriceV3(BlockchainDto chainInfo, double nativeTokenPrice, Dictionary<Token, List<BaseReserveCall>> reservesDict)
+    {
+        var priceDict = new Dictionary<Token, List<TokenPrice>>();
+        foreach (var token in reservesDict.Keys)
+        {
+            priceDict.Add(token, new List<TokenPrice>());
+            foreach (var entry in reservesDict[token])
+            {
+                if (entry is not ReserveV3Call reserveCall || !reserveCall.sqrtPriceX96.Success || !reserveCall.liquidity.Success || !reserveCall.token0.Success || !reserveCall.token1.Success) continue;
+                var sqrtPrice = new Rational(reserveCall.sqrtPriceX96.Output.SqrtPrice) / Rational.Pow(2, 96);
+                var pairPrice = Rational.Pow(sqrtPrice, 2);
+                var tokenADecimals = token.Address.Equals(reserveCall.token0.Output?.TokenAddress, StringComparison.OrdinalIgnoreCase) ? token.Decimals : chainInfo.NativeCurrency.Decimals;
+                var tokenBDecimals = token.Address.Equals(reserveCall.token0.Output?.TokenAddress, StringComparison.OrdinalIgnoreCase) ? chainInfo.NativeCurrency.Decimals : token.Decimals;
+                var buyOneOfTokenA = (double)(pairPrice / (Rational.Pow(10, tokenBDecimals) / Rational.Pow(10, tokenADecimals)));
+                var price = buyOneOfTokenA * nativeTokenPrice;
+                priceDict[token].Add(new TokenPrice(price, (double)((new Rational(reserveCall.liquidity.Output.Liquidity) / Rational.Pow(10, 18)) * pairPrice)));
+
+            }
+        }
+        return priceDict;
+    }
+
     public static TokenPrice GetTokenPrice(Token token, BlockchainCurrency nativeToken, ReserveCall reserve, double nativeTokenPrice)
     {
-        var tokenBDecimals = nativeToken.Decimals;
         var tokenB = new Rational(token.Address.Equals(reserve.token0.Output?.TokenAddress, StringComparison.OrdinalIgnoreCase) ?
                                 reserve.reserve.Output.Reserve1
                                 : reserve.reserve.Output.Reserve0);
@@ -119,15 +205,40 @@ This is True！
         var tokenA = new Rational(tokenB == reserve.reserve.Output.Reserve1 ?
                             reserve.reserve.Output.Reserve0
                             : reserve.reserve.Output.Reserve1);
-        var amountA = (double)(tokenA / Rational.Pow(10, token.Decimals == 0 ? 18 : token.Decimals));
-        var amountB = (double)(tokenB / Rational.Pow(10, tokenBDecimals));
-        if (amountA < 3 || amountB < 3)
+        if (tokenB == 0 || tokenA == 0)
         {
             return new TokenPrice(0, 0);
         }
-        var price = (double)(tokenB / Rational.Pow(10, nativeToken.Decimals)) / (double)(tokenA / Rational.Pow(10, token.Decimals)) * nativeTokenPrice; //nativeToken per Token
-        var liquidity = (double)(tokenB / Rational.Pow(10, nativeToken.Decimals)) * nativeTokenPrice + (double)(tokenA / Rational.Pow(10, token.Decimals == 0 ? 18 : token.Decimals)) * price;
+        var price = (double)((tokenB / Rational.Pow(10, nativeToken.Decimals)) / (tokenA / Rational.Pow(10, token.Decimals))) * nativeTokenPrice;
+        var liquidity = (double)(tokenB / Rational.Pow(10, nativeToken.Decimals)) * nativeTokenPrice;
         return new TokenPrice(price, liquidity);
+    }
+
+    public static async Task<Dictionary<Token, List<ReserveV3Call>>> GetTokenPriceV3(Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>? pairDict, Nethereum.Web3.Web3 web3)
+    {
+        var reservesDict = new Dictionary<Token, List<ReserveV3Call>>();
+        var callist = new List<IMulticallInputOutput>();
+
+        foreach (var entry in pairDict.Keys)
+        {
+            reservesDict.Add(entry, new List<ReserveV3Call>());
+            foreach (var pairResult in pairDict[entry])
+            {
+                var pair = pairResult.Output?.Pair;
+                if (string.IsNullOrEmpty(pair) || pair == "0x0000000000000000000000000000000000000000") continue;
+                var priceCall = new MulticallInputOutput<GetSlot0OfFunction, GetSlot0OfFunctionOutputDTOBase>(new GetSlot0OfFunction(), pair);
+                var liquidityCall = new MulticallInputOutput<GetLiquidityOfFunction, GetLiquidityOfFunctionOutputDTOBase>(new GetLiquidityOfFunction(), pair);
+                var token0Call = new MulticallInputOutput<GetToken0OfFunction, GetTokenOfFunctionOutputDTOBase>(new GetToken0OfFunction(), pair);
+                var token1Call = new MulticallInputOutput<GetToken1OfFunction, GetTokenOfFunctionOutputDTOBase>(new GetToken1OfFunction(), pair);
+                reservesDict[entry].Add(new ReserveV3Call(priceCall, liquidityCall, token0Call, token1Call));
+                callist.Add(priceCall);
+                callist.Add(liquidityCall);
+                callist.Add(token0Call);
+                callist.Add(token1Call);
+            }
+        }
+        await web3.Eth.GetMultiQueryHandler().MultiCallAsync(2000, callist.ToArray()).ConfigureAwait(false);
+        return reservesDict;
     }
 
     public static async Task<Dictionary<Token, List<ReserveCall>>> GetReserves(Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>? pairDict, Nethereum.Web3.Web3 web3)
@@ -152,22 +263,17 @@ This is True！
                 callist.Add(call3);
             }
         }
-        await web3.Eth.GetMultiQueryHandler().MultiCallAsync(1000, callist.ToArray()).ConfigureAwait(false);
+        await web3.Eth.GetMultiQueryHandler().MultiCallAsync(2000, callist.ToArray()).ConfigureAwait(false);
 
         return reservesDict;
     }
 
-    public static async Task<Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>?> GetPairsV2(IList<Token> tokens, Nethereum.Web3.Web3 web3, int chainId, string chainNativeTokenAddress, IList<TradingPlattform> tradingPlattformList)
+    public static async Task<Dictionary<Token, List<BaseReserveCall>>> GetPairs(IList<Token> tokens, Nethereum.Web3.Web3 web3, int chainId, string chainNativeTokenAddress, IList<TradingPlattform> tradingPlattformList)
     {
         var pairDict = new Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>();
-        var finalizedDict = new Dictionary<Token, List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>>();
+        var tokenPrices = new Dictionary<Token, List<BaseReserveCall>>();
         var callist = new List<MulticallInputOutput<GetPairOfFunction, GetPairOfFunctionOutputDTOBase>>();
 
-        tradingPlattformList.Add(new TradingPlattform()
-        {
-            ChainId = chainId,
-            Factory = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
-        });
         if (tradingPlattformList == null)
         {
             return null;
@@ -200,16 +306,29 @@ This is True！
             }
             try
             {
-                await web3.Eth.GetMultiQueryHandler().MultiCallAsync(1000, callist.ToArray()).ConfigureAwait(false);
-                foreach (var entry in pairDict)
+                await web3.Eth.GetMultiQueryHandler().MultiCallAsync(2000, callist.ToArray()).ConfigureAwait(false);
+                if (plattform.Version == PlattformVersion.V3)
                 {
-                    if (!finalizedDict.ContainsKey(entry.Key))
+                    var reserves = await GetTokenPriceV3(pairDict, web3);
+                    foreach (var reserve in reserves)
                     {
-                        finalizedDict.Add(entry.Key, entry.Value);
+                        if (!tokenPrices.ContainsKey(reserve.Key))
+                        {
+                            tokenPrices.Add(reserve.Key, new List<BaseReserveCall>());
+                        }
+                        tokenPrices[reserve.Key].AddRange(reserve.Value);
                     }
-                    else
+                }
+                else
+                {
+                    var reserves = await GetReserves(pairDict, web3);
+                    foreach (var reserve in reserves)
                     {
-                        finalizedDict[entry.Key].AddRange(entry.Value);
+                        if (!tokenPrices.ContainsKey(reserve.Key))
+                        {
+                            tokenPrices.Add(reserve.Key, new List<BaseReserveCall>());
+                        }
+                        tokenPrices[reserve.Key].AddRange(reserve.Value);
                     }
                 }
                 pairDict.Clear();
@@ -227,7 +346,8 @@ This is True！
                 callist.Clear();
             }
         }
-        return finalizedDict;
+
+        return tokenPrices;
     }
 
 
@@ -244,12 +364,7 @@ This is True！
     {
         using var scope = _scopeFactory.CreateScope();
         var _unitOfWork = scope.ServiceProvider.GetRequiredService<IWeb3UnitOfWork>();
-        foreach (var token in tokens)
-        {
-            _unitOfWork.Tokens.Update(token);
-        }
-        //TODO: Store in Historical Data?
-        //_unitOfWork.Tokens.Update(tokens.ToArray());
+        _unitOfWork.Tokens.Update(tokens.ToArray());
         _unitOfWork.Commit();
     }
 }

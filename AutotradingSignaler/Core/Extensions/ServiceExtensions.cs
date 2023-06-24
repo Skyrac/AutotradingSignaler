@@ -18,14 +18,13 @@ public static class ServiceExtensions
     public static IServiceCollection AddDatabaseContext<T>(this IServiceCollection services, IConfiguration configuration)
         where T : DbContext, IDatabaseContext
     {
-        var postgreSqlConnectionString = $"Host={configuration["PGHOST"]};Port={configuration["PGPORT"]};Username={configuration["PGUSER"]};Password={configuration["PGPASSWORD"]};Database={configuration["PGABOATDB"]};Pooling=true;SSL Mode=Require;TrustServerCertificate=True;Include Error Detail=True";
+        var postgreSqlConnectionString = $"Host={configuration["PGHOST"]};Port={configuration["PGPORT"]};Username={configuration["PGUSER"]};Password={configuration["PGPASSWORD"]};Database={configuration["PGDB"]};Pooling=true;SSL Mode=Require;TrustServerCertificate=True;Include Error Detail=True";
         return services.AddDbContext<T>(options =>
         {
-            options.UseInMemoryDatabase("Test").UseLowerCaseNamingConvention();
-            //options.UseNpgsql(postgreSqlConnectionString, serverOptions =>
-            //{
-            //    serverOptions.EnableRetryOnFailure();
-            //});
+            options.UseNpgsql(postgreSqlConnectionString, serverOptions =>
+            {
+                serverOptions.EnableRetryOnFailure();
+            });
         });
     }
 

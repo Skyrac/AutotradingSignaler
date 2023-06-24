@@ -27,6 +27,12 @@ public class TradeController : ControllerBase
         return Ok(response);
     }
 
+    [HttpGet("performances")]
+    public async Task<ActionResult<List<TraderDto>>> GetBestPerformingTraders([FromQuery] GetBestPerformingTraderQuery query)
+    {
+        return Ok(await _mediator.Send(query));
+    }
+
     [HttpPost("watchlist/{address}/add")]
     public async Task<ActionResult<WalletDto>> AddToWatchlist(string address)
     {

@@ -2,7 +2,6 @@
 
 using _1InchApi;
 using AutotradingSignaler.Contracts.Data;
-using AutotradingSignaler.Contracts.Dtos;
 using AutotradingSignaler.Contracts.Web3;
 using AutotradingSignaler.Persistence.UnitsOfWork.Web3.Interfaces;
 using Nethereum.Web3;
@@ -65,8 +64,8 @@ public class Web3Service
         _logger = logger;
         _configuration = configuration;
         _scopeFactory = scopeFactory;
-        var address = configuration["OracleWallet"];
-        var privateKey = configuration["OraclePrivateKey"];
+        var address = configuration["ORACLEWALLET"];
+        var privateKey = configuration["ORACLEPRIVATEKEY"];
         foreach (var blockchain in Chains.Values)
         {
             var account = new Account(privateKey);
@@ -98,11 +97,8 @@ public class Web3Service
                                     }));
             }
         }
-        foreach (var token in newTokens)
-        {
-            _unitOfWork.Tokens.Add(token);
 
-        }
+        _unitOfWork.Tokens.AddOrUpdate(newTokens.ToArray());
         _unitOfWork.Commit();
     }
 

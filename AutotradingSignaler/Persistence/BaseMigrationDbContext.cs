@@ -21,7 +21,10 @@ namespace AutotradingSignaler.Persistence
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseInMemoryDatabase("Test").UseSnakeCaseNamingConvention();
+            optionsBuilder.UseNpgsql(serverOptions =>
+            {
+                serverOptions.EnableRetryOnFailure();
+            });
             base.OnConfiguring(optionsBuilder);
         }
     }
